@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self';">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>Sync Jam</title>
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">Sync Jam</div>
+    <div class="session">
+      <input id="displayName" placeholder="Display name" />
+      <button id="createSession">Create</button>
+      <input id="joinCode" placeholder="Join code" />
+      <button id="joinSession">Join</button>
+      <div class="sessionMeta" id="sessionMeta"></div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="panel">
+      <div class="panelTitle">My Playlist (iTunes)</div>
+      <div class="row">
+        <select id="itunesPlaylists"></select>
+        <button id="reloadItunes">Reload</button>
+      </div>
+      <input id="searchMine" placeholder="Search..." />
+      <div class="list" id="myTracks"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panelTitle">Shared Playlist</div>
+
+      <div class="nowPlaying" id="nowPlaying">
+        <div class="npTitle">Not playing</div>
+        <div class="npMeta"></div>
+        <div class="npProgress"><div class="bar" id="npBar"></div></div>
+      </div>
+
+      <div class="hostControls">
+        <button id="hostPlay">Play</button>
+        <button id="hostPause">Pause</button>
+        <button id="hostNext">Next</button>
+      </div>
+
+      <div class="list" id="queue"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "syncsong-desktop",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^31.0.0"
+  }
+}
