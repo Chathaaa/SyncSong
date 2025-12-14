@@ -4,11 +4,18 @@ contextBridge.exposeInMainWorld("api", {
   itunes: {
     available: () => ipcRenderer.invoke("itunes:available"),
     nowPlaying: () => ipcRenderer.invoke("itunes:nowPlaying"),
-    playByPersistentId: (pid) => ipcRenderer.invoke("itunes:playByPersistentId", pid),
+    playFromPlaylist: (playlistIndex, trackIndex) =>
+        ipcRenderer.invoke("itunes:playFromPlaylist", playlistIndex, trackIndex),
+    // playByPersistentId: (pid) => ipcRenderer.invoke("itunes:playByPersistentId", pid),
+    // playByDatabaseId: (dbId) => ipcRenderer.invoke("itunes:playByDatabaseId", dbId),
+    // playByTrackId: (trackId) => ipcRenderer.invoke("itunes:playByTrackId", trackId),
     pause: () => ipcRenderer.invoke("itunes:pause"),
     play: () => ipcRenderer.invoke("itunes:play"),
     next: () => ipcRenderer.invoke("itunes:next"),
     listPlaylists: () => ipcRenderer.invoke("itunes:listPlaylists"),
-    listTracks: (playlistName) => ipcRenderer.invoke("itunes:listTracks", playlistName),
+    listTracks: (playlistIndex) => ipcRenderer.invoke("itunes:listTracks", playlistIndex),
   },
+  openExternal: (url) => ipcRenderer.invoke("app:openExternal", url),
+  spotifyConnect: () => ipcRenderer.invoke("spotify:connect"),
+
 });

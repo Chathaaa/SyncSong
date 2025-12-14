@@ -1,4 +1,3 @@
-
 const WS_URL = "wss://syncsong-2lxp.onrender.com";
 
 let ws;
@@ -9,6 +8,23 @@ let hostUserId = null;
 let queue = [];
 let nowPlaying = null;
 
+// unified music panel state
+let musicSource = localStorage.getItem("syncsong:lastSource") || "itunes"; // "itunes" | "spotify"
+let playlists = [];      // [{id,name}]
+let tracks = [];         // unified track objects
+let tracksFiltered = [];
+
+let currentItunesPlaylistIndex = null;
+
+// session + UX helpers
+let pendingAddTrack = null;
+let pendingCreate = false;
+
+// playback behavior
+let loopQueue = true; // default
+let autoAdvanceLock = false;
+
+// UI helpers
 const el = (id) => document.getElementById(id);
 
 function send(type, payload) {
@@ -16,6 +32,85 @@ function send(type, payload) {
   ws.send(JSON.stringify({ type, payload }));
 }
 
+function escapeHtml(s) {
+  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+  }[c]));
+}
+
+function cryptoRandomId() {
+  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) return "";
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+
+// ---------- Clipboard / Share ----------
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      document.body.removeChild(ta);
+      return false;
+    }
+  }
+}
+
+function getInviteText() {
+  return `Join my SyncSong session: ${sessionId}\n\nOpen the app → paste the code → Join.`;
+}
+
+function renderShareButton() {
+  const btn = el("copySession");
+  if (!btn) return;
+
+  if (!sessionId) {
+    btn.style.display = "none";
+    return;
+  }
+  btn.style.display = "inline-block";
+}
+
+async function autoCopyInvitePulse() {
+  const btn = el("copySession");
+  if (!btn || !sessionId) return;
+
+  const ok = await copyTextToClipboard(getInviteText());
+  if (ok) {
+    const old = btn.textContent;
+    btn.textContent = "Copied!";
+    setTimeout(() => (btn.textContent = old), 1200);
+  }
+}
+
+// ---------- Session meta ----------
+function renderSessionMeta() {
+  const isHost = userId && hostUserId && userId === hostUserId;
+  el("sessionMeta").textContent = sessionId
+    ? `Session: ${sessionId} ${isHost ? "(Host)" : ""}`
+    : "No session";
+  renderShareButton();
+}
+
+// ---------- WS ----------
 function connectWS() {
   ws = new WebSocket(WS_URL);
 
@@ -33,7 +128,20 @@ function connectWS() {
 
     if (msg.type === "session:created") {
       sessionId = msg.sessionId;
+      pendingCreate = false;
       renderSessionMeta();
+
+      // If user clicked +Add before session existed, add now
+      if (pendingAddTrack) {
+        const t = pendingAddTrack;
+        pendingAddTrack = null;
+        send("queue:add", { sessionId, track: t });
+        // auto-copy invite for convenience
+        setTimeout(() => autoCopyInvitePulse(), 50);
+      } else {
+        // created manually; still nice to copy
+        setTimeout(() => autoCopyInvitePulse(), 50);
+      }
       return;
     }
 
@@ -71,105 +179,251 @@ function connectWS() {
   };
 }
 
-function renderSessionMeta() {
-  const isHost = userId && hostUserId && userId === hostUserId;
-  el("sessionMeta").textContent = sessionId
-    ? `Session: ${sessionId} ${isHost ? "(Host)" : ""}`
-    : "No session";
+// ---------- Unified music panel ----------
+const LAST_SOURCE_KEY = "syncsong:lastSource";
+const LAST_ITUNES_PLAYLIST_KEY = "syncsong:lastItunesPlaylistIndex";
+const LAST_SPOTIFY_PLAYLIST_KEY = "syncsong:lastSpotifyPlaylistId";
+
+// Spotify token helpers (renderer-side API calls)
+function getSpotifyAccessToken() {
+  const tok = localStorage.getItem("spotify:access_token") || "";
+  const exp = Number(localStorage.getItem("spotify:expires_at") || "0");
+  if (!tok) return null;
+  if (exp && Date.now() > exp - 10_000) return null;
+  return tok;
 }
 
-function fmtMs(ms) {
-  if (!ms && ms !== 0) return "";
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${String(r).padStart(2, "0")}`;
+async function spotifyFetch(path) {
+  const token = getSpotifyAccessToken();
+  if (!token) throw new Error("Spotify not connected (or token expired). Click Connect Spotify.");
+
+  const res = await fetch(`https://api.spotify.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error?.message || `Spotify API error: ${res.status}`);
+  return json;
 }
 
-// ----- iTunes left panel -----
-let myTracks = [];
-let myTracksFiltered = [];
+function renderMusicTabs() {
+  const itBtn = el("sourceItunes");
+  const spBtn = el("sourceSpotify");
+  if (itBtn) itBtn.classList.toggle("active", musicSource === "itunes");
+  if (spBtn) spBtn.classList.toggle("active", musicSource === "spotify");
 
-async function loadItunes() {
-  const ok = await window.api.itunes.available();
-  if (!ok) {
-    el("sessionMeta").textContent = "iTunes not found. Please install iTunes.";
-    return;
-  }
+  const spConnect = el("connectSpotify");
+  if (spConnect) spConnect.style.display = (musicSource === "spotify") ? "inline-block" : "none";
+}
 
-  const pls = await window.api.itunes.listPlaylists();
-  const sel = el("itunesPlaylists");
+function renderLoopToggle() {
+  const btn = el("toggleLoop");
+  if (!btn) return;
+  btn.textContent = `Loop: ${loopQueue ? "On" : "Off"}`;
+}
+
+function clearMusicPanel() {
+  playlists = [];
+  tracks = [];
+  tracksFiltered = [];
+  const sel = el("musicPlaylists");
+  const box = el("musicTracks");
+  if (sel) sel.innerHTML = "";
+  if (box) box.innerHTML = "";
+}
+
+function renderMusicPlaylists() {
+  const sel = el("musicPlaylists");
+  if (!sel) return;
+
   sel.innerHTML = "";
-  pls.forEach((p) => {
+  playlists.forEach((p) => {
     const opt = document.createElement("option");
-    opt.value = p.name;
+    opt.value = String(p.id);
     opt.textContent = p.name;
     sel.appendChild(opt);
   });
 
-  if (pls[0]) {
-    sel.value = pls[0].name;
-    await loadItunesTracks(pls[0].name);
-  }
+  if (!playlists.length) return;
+
+  let desired = null;
+  if (musicSource === "itunes") desired = localStorage.getItem(LAST_ITUNES_PLAYLIST_KEY);
+  if (musicSource === "spotify") desired = localStorage.getItem(LAST_SPOTIFY_PLAYLIST_KEY);
+
+  const exists = desired && playlists.some(p => String(p.id) === String(desired));
+  const initialId = exists ? String(desired) : String(playlists[0].id);
+
+  sel.value = initialId;
 }
 
-async function loadItunesTracks(playlistName) {
-  const tracks = await window.api.itunes.listTracks(playlistName);
-  myTracks = tracks.map((t) => ({
+function applySearch() {
+  const q = (el("searchMine")?.value || "").toLowerCase().trim();
+  tracksFiltered = !q
+    ? tracks
+    : tracks.filter((t) =>
+        `${t.title} ${t.artist} ${t.album || ""}`.toLowerCase().includes(q)
+      );
+  renderMusicTracks();
+}
+
+function renderMusicTracks() {
+  const box = el("musicTracks");
+  if (!box) return;
+
+  box.innerHTML = "";
+  tracksFiltered.forEach((t) => {
+    const row = document.createElement("div");
+    row.className = "item";
+
+    const extraBtn =
+      t.source === "spotify"
+        ? `<button data-open="${t.id}">Open</button>`
+        : ``;
+
+    row.innerHTML = `
+        <div class="left">
+            <div class="title">${escapeHtml(t.title)}</div>
+            <div class="meta">${escapeHtml(t.artist)} • ${escapeHtml(t.album || "")} • ${fmtMs(t.durationMs)}</div>
+        </div>
+        <div class="actions">
+            <button data-add="${t.id}">+ Add</button>
+            <button data-open="${t.id}" ${t.source === "spotify" ? "" : "disabled"}>Open</button>
+        </div>
+        `;
+
+    row.querySelector("[data-add]").addEventListener("click", () => addToQueue(t));
+
+    row.querySelector("[data-open]").addEventListener("click", async () => {
+    if (t.source !== "spotify") return;
+    const ok = await window.api.openExternal(t.spotifyUri);
+    if (!ok && t.spotifyUrl) await window.api.openExternal(t.spotifyUrl);
+    });
+
+    box.appendChild(row);
+  });
+}
+
+async function loadItunesPlaylistsAndTracks() {
+  const ok = await window.api.itunes.available();
+  if (!ok) throw new Error("iTunes not found. Please install iTunes.");
+
+  const pls = await window.api.itunes.listPlaylists();
+  playlists = pls.map(p => ({ id: String(p.index), name: p.name }));
+  renderMusicPlaylists();
+
+  const selId = el("musicPlaylists").value;
+  await loadItunesTracks(selId);
+}
+
+async function loadItunesTracks(playlistIndex) {
+  localStorage.setItem(LAST_ITUNES_PLAYLIST_KEY, String(playlistIndex));
+
+  const raw = await window.api.itunes.listTracks(Number(playlistIndex));
+  currentItunesPlaylistIndex = Number(playlistIndex);
+
+  tracks = raw.map((t) => ({
     id: cryptoRandomId(),
     source: "itunes",
     title: t.title,
     artist: t.artist,
     album: t.album,
     durationMs: t.durationMs,
-    itunesPersistentId: t.persistentId
+
+    itunesPlaylistIndex: currentItunesPlaylistIndex,
+    itunesPlaylistTrackIndex: Number(t.trackIndex ?? 0),
+
+    // optional ids (may be blank/0, but kept)
+    itunesTrackId: Number(t.trackId ?? 0),
+    itunesPersistentId: String(t.persistentId ?? ""),
   }));
+
   applySearch();
 }
 
-function applySearch() {
-  const q = (el("searchMine").value || "").toLowerCase().trim();
-  myTracksFiltered = !q
-    ? myTracks
-    : myTracks.filter((t) =>
-        `${t.title} ${t.artist} ${t.album || ""}`.toLowerCase().includes(q)
-      );
-  renderMyTracks();
+async function loadSpotifyPlaylistsAndTracks() {
+  const tok = getSpotifyAccessToken();
+  if (!tok) throw new Error("Spotify not connected. Click Connect Spotify.");
+
+  const data = await spotifyFetch("/me/playlists?limit=50");
+  const pls = data.items || [];
+
+  playlists = pls.map(p => ({ id: p.id, name: p.name }));
+  renderMusicPlaylists();
+
+  const selId = el("musicPlaylists").value;
+  await loadSpotifyTracks(selId);
 }
 
-function renderMyTracks() {
-  const box = el("myTracks");
-  box.innerHTML = "";
-  myTracksFiltered.forEach((t) => {
-    const row = document.createElement("div");
-    row.className = "item";
-    row.innerHTML = `
-      <div class="left">
-        <div class="title">${escapeHtml(t.title)}</div>
-        <div class="meta">${escapeHtml(t.artist)} • ${escapeHtml(t.album || "")} • ${fmtMs(t.durationMs)}</div>
-      </div>
-      <div class="actions">
-        <button data-add="${t.id}">+ Add</button>
-      </div>
-    `;
-    row.querySelector("[data-add]").addEventListener("click", () => addToQueue(t));
-    box.appendChild(row);
-  });
+async function loadSpotifyTracks(playlistId) {
+  localStorage.setItem(LAST_SPOTIFY_PLAYLIST_KEY, String(playlistId));
+
+  const data = await spotifyFetch(`/playlists/${playlistId}/tracks?limit=100`);
+  const items = data.items || [];
+
+  tracks = items
+    .map(it => it.track)
+    .filter(Boolean)
+    .map(t => ({
+      id: cryptoRandomId(),
+      source: "spotify",
+      title: t.name,
+      artist: t.artists?.[0]?.name || "Unknown",
+      album: t.album?.name || "",
+      durationMs: t.duration_ms || 0,
+      spotifyTrackId: t.id,
+      spotifyUri: t.uri,
+      spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
+    }));
+
+  applySearch();
+}
+
+async function reloadMusic() {
+  try {
+    clearMusicPanel();
+
+    if (musicSource === "itunes") {
+      await loadItunesPlaylistsAndTracks();
+    } else {
+      await loadSpotifyPlaylistsAndTracks();
+    }
+  } catch (e) {
+    el("sessionMeta").textContent = e?.message || String(e);
+  }
+}
+
+function setSource(next) {
+  musicSource = next;
+  localStorage.setItem(LAST_SOURCE_KEY, musicSource);
+  renderMusicTabs();
+  reloadMusic();
+}
+
+// ---------- Queue + playback ----------
+function ensureSessionForAdd(track) {
+  if (sessionId) return true;
+
+  pendingAddTrack = track;
+
+  if (!pendingCreate) {
+    pendingCreate = true;
+    const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
+    send("session:create", { displayName });
+    el("sessionMeta").textContent = "Creating session...";
+  }
+  return false;
 }
 
 function addToQueue(track) {
-  if (!sessionId) {
-    el("sessionMeta").textContent = "Create or join a session first.";
-    return;
-  }
+  if (!ensureSessionForAdd(track)) return;
   send("queue:add", { sessionId, track });
 }
 
-// ----- right panel -----
 function renderQueue() {
   const box = el("queue");
-  box.innerHTML = "";
+  if (!box) return;
 
+  box.innerHTML = "";
   const isHost = userId && hostUserId && userId === hostUserId;
 
   queue.forEach((q) => {
@@ -179,7 +433,7 @@ function renderQueue() {
     row.innerHTML = `
       <div class="left">
         <div class="title">${escapeHtml(t.title)}</div>
-        <div class="meta">${escapeHtml(t.artist)} • added by ${escapeHtml(q.addedBy?.displayName || "someone")}</div>
+        <div class="meta">${escapeHtml(t.artist)} • added by ${escapeHtml(q.addedBy?.displayName || "someone")} • ${escapeHtml(t.source || "")}</div>
       </div>
       <div class="actions">
         ${isHost ? `<button data-play="${q.queueId}">Play</button>` : ``}
@@ -189,7 +443,9 @@ function renderQueue() {
 
     if (isHost) {
       row.querySelector("[data-play]").addEventListener("click", () => hostPlayQueueItem(q));
-      row.querySelector("[data-remove]").addEventListener("click", () => send("queue:remove", { sessionId, queueId: q.queueId }));
+      row.querySelector("[data-remove]").addEventListener("click", () =>
+        send("queue:remove", { sessionId, queueId: q.queueId })
+      );
     }
 
     box.appendChild(row);
@@ -200,19 +456,33 @@ async function hostPlayQueueItem(qItem) {
   const isHost = userId && hostUserId && userId === hostUserId;
   if (!isHost) return;
 
-  const pid = qItem.track.itunesPersistentId;
-  if (!pid) {
-    el("sessionMeta").textContent = "This track isn't playable via iTunes (missing persistentId).";
-    return;
+  autoAdvanceLock = false;
+
+  // iTunes track: play via COM
+  if (qItem.track.source === "itunes") {
+    const pIdx = qItem.track.itunesPlaylistIndex;
+    const tIdx = qItem.track.itunesPlaylistTrackIndex;
+
+    if (!pIdx || !tIdx) {
+      el("sessionMeta").textContent =
+        "This track can't be played (missing playlist/track index). Reload playlist and try again.";
+      return;
+    }
+
+    const ok = await window.api.itunes.playFromPlaylist(pIdx, tIdx);
+    if (!ok) {
+      el("sessionMeta").textContent = "Could not start playback in iTunes.";
+      return;
+    }
   }
 
-  const ok = await window.api.itunes.playByPersistentId(pid);
-  if (!ok) {
-    el("sessionMeta").textContent = "Could not start playback in iTunes.";
-    return;
+  // Spotify track: we can't control playback via Spotify API yet; open locally
+  if (qItem.track.source === "spotify") {
+    const ok = await window.api.openExternal(qItem.track.spotifyUri);
+    if (!ok && qItem.track.spotifyUrl) await window.api.openExternal(qItem.track.spotifyUrl);
   }
 
-  // Set nowPlaying immediately (we'll refine via polling)
+  // Set nowPlaying immediately (polling refines for iTunes)
   nowPlaying = {
     queueId: qItem.queueId,
     track: qItem.track,
@@ -222,11 +492,51 @@ async function hostPlayQueueItem(qItem) {
     updatedAt: Date.now()
   };
   send("host:state", { sessionId, nowPlaying });
+  renderNowPlaying();
+}
+
+async function playNextInSharedQueue() {
+  const isHost = userId && hostUserId && userId === hostUserId;
+  if (!isHost) return;
+  if (!queue.length) return;
+
+  if (!nowPlaying?.queueId) {
+    await hostPlayQueueItem(queue[0]);
+    return;
+  }
+
+  const idx = queue.findIndex(q => q.queueId === nowPlaying.queueId);
+  if (idx < 0) {
+    await hostPlayQueueItem(queue[0]);
+    return;
+  }
+
+  const nextIdx = idx + 1;
+
+  if (nextIdx >= queue.length) {
+    if (!loopQueue) {
+      // stop at end
+      return;
+    }
+    await hostPlayQueueItem(queue[0]);
+    return;
+  }
+
+  await hostPlayQueueItem(queue[nextIdx]);
+}
+
+// ---------- Now playing UI ----------
+function computeExpectedPlayhead(np) {
+  if (!np) return 0;
+  if (!np.isPlaying) return np.playheadMs || 0;
+  const startedAt = np.startedAt || Date.now();
+  return Math.max(0, Date.now() - startedAt);
 }
 
 function renderNowPlaying() {
   const box = el("nowPlaying");
   const bar = el("npBar");
+  if (!box || !bar) return;
 
   if (!nowPlaying) {
     box.querySelector(".npTitle").textContent = "Not playing";
@@ -236,119 +546,218 @@ function renderNowPlaying() {
   }
 
   const t = nowPlaying.track;
-  box.querySelector(".npTitle").textContent = `${t.title}`;
   const playhead = computeExpectedPlayhead(nowPlaying);
+
+  box.querySelector(".npTitle").textContent = `${t.title}`;
   box.querySelector(".npMeta").textContent =
-    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"}`;
+    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : "iTunes"}`;
 
   const pct = t.durationMs ? Math.max(0, Math.min(1, playhead / t.durationMs)) : 0;
   bar.style.width = `${pct * 100}%`;
 }
 
-function computeExpectedPlayhead(np) {
-  if (!np) return 0;
-  if (!np.isPlaying) return np.playheadMs || 0;
-  const startedAt = np.startedAt || Date.now();
-  const raw = Date.now() - startedAt;
-  return Math.max(0, raw);
-}
+// ---------- Host polling (iTunes only) ----------
+let lastPos = null;
 
-// Host: poll iTunes and publish host state (v2-ready)
-async function startHostPolling() {
+function startHostPolling() {
   setInterval(async () => {
     const isHost = userId && hostUserId && userId === hostUserId;
     if (!isHost || !sessionId) return;
 
+    // Only poll/refine when current is iTunes track
+    if (!nowPlaying || nowPlaying.track?.source !== "itunes") {
+      return;
+    }
+
     const np = await window.api.itunes.nowPlaying();
-    if (!np?.persistentId) return;
+    if (!np) return;
 
-    // Find matching queue item (best effort)
-    const current = queue.find(q => q.track?.itunesPersistentId === np.persistentId) || null;
+    const pos = Number(np.playerPositionMs ?? 0);
+    const state = Number(np.playerState ?? 0);
 
-    const isPlaying = np.playerState === 1; // typical value for playing
-    const playheadMs = np.playerPositionMs || 0;
+    const positionMoved = lastPos !== null && Math.abs(pos - lastPos) > 250;
+    const isPlaying = (state === 1) || positionMoved;
+    lastPos = pos;
 
-    const track = current?.track || {
-      id: "unknown",
-      source: "itunes",
-      title: np.title || "Unknown",
-      artist: np.artist || "Unknown",
-      album: np.album || "",
-      durationMs: np.durationMs || 0,
-      itunesPersistentId: np.persistentId
-    };
+    // Keep the queueId + track from our queue item (authoritative)
+    const currentQueueItem = queue.find(q => q.queueId === nowPlaying.queueId) || null;
+    const track = currentQueueItem?.track || nowPlaying.track;
 
-    const queueId = current?.queueId || null;
+    const startedAt = isPlaying
+      ? (Date.now() - pos)
+      : (nowPlaying.startedAt ?? (Date.now() - pos));
 
-    const startedAt = isPlaying ? (Date.now() - playheadMs) : (nowPlaying?.startedAt || Date.now() - playheadMs);
+    // Auto-advance: trigger BEFORE iTunes advances its own playlist
+    const dur = Number(track.durationMs ?? 0);
+    const shouldAutoAdvance =
+      isPlaying &&
+      dur > 0 &&
+      pos >= dur - 1200 && // ~1.2s before end
+      !autoAdvanceLock;
 
-    const nextNowPlaying = {
-      queueId,
+    if (shouldAutoAdvance) {
+      autoAdvanceLock = true;
+
+      // stop iTunes from continuing its own playlist
+      await window.api.itunes.pause();
+
+      // advance our queue (respects loopQueue)
+      await playNextInSharedQueue();
+
+      setTimeout(() => { autoAdvanceLock = false; }, 1500);
+      return; // stop this poll tick
+    }
+
+    nowPlaying = {
+      queueId: nowPlaying.queueId,
       track,
       isPlaying,
-      playheadMs,
+      playheadMs: pos,
       startedAt,
       updatedAt: Date.now()
     };
 
-    // Avoid spamming if nothing changed materially (simple)
-    nowPlaying = nextNowPlaying;
     send("host:state", { sessionId, nowPlaying });
     renderNowPlaying();
-  }, 1000);
+  }, 500);
+
+  // Smooth progress bar updates on everyone
+  setInterval(renderNowPlaying, 500);
 }
 
-// Host control buttons
-el("hostPlay").addEventListener("click", async () => {
-  const isHost = userId && hostUserId && userId === hostUserId;
-  if (!isHost) return;
-  await window.api.itunes.play();
-});
-el("hostPause").addEventListener("click", async () => {
-  const isHost = userId && hostUserId && userId === hostUserId;
-  if (!isHost) return;
-  await window.api.itunes.pause();
-});
-el("hostNext").addEventListener("click", async () => {
-  const isHost = userId && hostUserId && userId === hostUserId;
-  if (!isHost) return;
-  await window.api.itunes.next();
-});
+// ---------- Button wiring ----------
+function wireUi() {
+  // Session buttons
+  el("createSession")?.addEventListener("click", () => {
+    const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
+    send("session:create", { displayName });
+  });
 
-// Session buttons
-el("createSession").addEventListener("click", () => {
-  const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
-  send("session:create", { displayName });
-});
-el("joinSession").addEventListener("click", () => {
-  const displayName = (el("displayName").value || "Guest").trim().slice(0, 32);
-  const code = (el("joinCode").value || "").trim().toUpperCase();
-  if (!code) return;
-  send("session:join", { sessionId: code, displayName });
-});
+  el("joinSession")?.addEventListener("click", () => {
+    const displayName = (el("displayName").value || "Guest").trim().slice(0, 32);
+    const code = (el("joinCode").value || "").trim().toUpperCase();
+    if (!code) return;
+    send("session:join", { sessionId: code, displayName });
+  });
 
-// UI event wiring
-el("reloadItunes").addEventListener("click", loadItunes);
-el("itunesPlaylists").addEventListener("change", async (e) => {
-  await loadItunesTracks(e.target.value);
-});
-el("searchMine").addEventListener("input", applySearch);
+  // Copy invite
+  el("copySession")?.addEventListener("click", async () => {
+    if (!sessionId) return;
+    const ok = await copyTextToClipboard(getInviteText());
+    if (ok) {
+      const btn = el("copySession");
+      const old = btn.textContent;
+      btn.textContent = "Copied!";
+      setTimeout(() => (btn.textContent = old), 1200);
+    } else {
+      el("sessionMeta").textContent = "Couldn’t copy to clipboard.";
+    }
+  });
 
-// Helpers
-function cryptoRandomId() {
-  // simple, good enough for UI ids
-  return Math.random().toString(16).slice(2) + Date.now().toString(16);
+  // Source toggle + reload
+  el("sourceItunes")?.addEventListener("click", () => setSource("itunes"));
+  el("sourceSpotify")?.addEventListener("click", () => setSource("spotify"));
+  el("reloadMusic")?.addEventListener("click", reloadMusic);
+
+  // Playlist change
+  el("musicPlaylists")?.addEventListener("change", async (e) => {
+    const id = e.target.value;
+    try {
+      if (musicSource === "itunes") await loadItunesTracks(id);
+      else await loadSpotifyTracks(id);
+    } catch (err) {
+      el("sessionMeta").textContent = err?.message || String(err);
+    }
+  });
+
+  // Search
+  el("searchMine")?.addEventListener("input", applySearch);
+
+  // Loop toggle
+  el("toggleLoop")?.addEventListener("click", () => {
+    loopQueue = !loopQueue;
+    renderLoopToggle();
+  });
+
+  // Host controls
+  el("hostPlay")?.addEventListener("click", async () => {
+    const isHost = userId && hostUserId && userId === hostUserId;
+    if (!isHost) return;
+
+    // If currently iTunes track, resume iTunes
+    if (nowPlaying?.track?.source === "itunes") {
+      await window.api.itunes.play();
+      if (nowPlaying) {
+        const playheadMs = nowPlaying.playheadMs ?? 0;
+        nowPlaying = {
+          ...nowPlaying,
+          isPlaying: true,
+          startedAt: Date.now() - playheadMs,
+          updatedAt: Date.now()
+        };
+        send("host:state", { sessionId, nowPlaying });
+        renderNowPlaying();
+      }
+      return;
+    }
+
+    // If spotify track, "play" just opens it
+    if (nowPlaying?.track?.source === "spotify") {
+      const ok = await window.api.openExternal(nowPlaying.track.spotifyUri);
+      if (!ok && nowPlaying.track.spotifyUrl) await window.api.openExternal(nowPlaying.track.spotifyUrl);
+      return;
+    }
+
+    // If nothing playing, start first queue item
+    if (!nowPlaying?.queueId && queue.length) {
+      await hostPlayQueueItem(queue[0]);
+    }
+  });
+
+  el("hostPause")?.addEventListener("click", async () => {
+    const isHost = userId && hostUserId && userId === hostUserId;
+    if (!isHost) return;
+
+    // Pause only meaningful for iTunes; for spotify we just mark paused
+    if (nowPlaying?.track?.source === "itunes") {
+      await window.api.itunes.pause();
+    }
+
+    if (nowPlaying) {
+      nowPlaying = {
+        ...nowPlaying,
+        isPlaying: false,
+        updatedAt: Date.now()
+      };
+      send("host:state", { sessionId, nowPlaying });
+      renderNowPlaying();
+    }
+  });
+
+  el("hostNext")?.addEventListener("click", async () => {
+    await playNextInSharedQueue();
+  });
+
+  // Spotify connect
+  el("connectSpotify")?.addEventListener("click", async () => {
+    try {
+      const tok = await window.api.spotifyConnect();
+      localStorage.setItem("spotify:access_token", tok.access_token);
+      localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
+      localStorage.setItem("spotify:expires_at", String(Date.now() + tok.expires_in * 1000));
+      el("sessionMeta").textContent = "Spotify connected!";
+      await reloadMusic();
+    } catch (e) {
+      el("sessionMeta").textContent = "Spotify connect failed: " + (e?.message || String(e));
+    }
+  });
 }
-function escapeHtml(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
-  }[c]));
-}
 
-// Start everything
+// ---------- Boot ----------
 connectWS();
-loadItunes();
+wireUi();
+renderMusicTabs();
+renderLoopToggle();
+renderShareButton();
+setSource(musicSource);
 startHostPolling();
-
-// Smooth progress bar updates for non-hosts too
-setInterval(renderNowPlaying, 500);

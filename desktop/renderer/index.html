@@ -5,29 +5,38 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: https:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self';">
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="styles.css" />
-  <title>Sync Jam</title>
+  <title>SyncSong</title>
 </head>
 <body>
   <div class="topbar">
-    <div class="brand">Sync Jam</div>
+    <div class="brand">SyncSong</div>
     <div class="session">
       <input id="displayName" placeholder="Display name" />
       <button id="createSession">Create</button>
       <input id="joinCode" placeholder="Join code" />
       <button id="joinSession">Join</button>
+      <button id="copySession">Copy invite</button>
       <div class="sessionMeta" id="sessionMeta"></div>
+      
     </div>
   </div>
 
   <div class="layout">
-    <div class="panel">
-      <div class="panelTitle">My Playlist (iTunes)</div>
-      <div class="row">
-        <select id="itunesPlaylists"></select>
-        <button id="reloadItunes">Reload</button>
-      </div>
-      <input id="searchMine" placeholder="Search..." />
-      <div class="list" id="myTracks"></div>
+    <div class="leftPanel">
+        <div class="panelHeader">
+            <div class="row">
+            <button id="sourceItunes" class="tab active">iTunes</button>
+            <button id="sourceSpotify" class="tab">Spotify</button>
+            <button id="connectSpotify" style="display:none;">Connect Spotify</button>
+            </div>
+        </div>
+        <div style="margin-bottom:10px">
+            <select id="musicPlaylists"></select>
+            <input id="searchMine" placeholder="Search tracks..." />
+            <button id="reloadMusic" title="Reload">&#10227;</button>
+        </div>
+
+        <div id="musicTracks"></div>
     </div>
 
     <div class="panel">
@@ -43,6 +52,7 @@
         <button id="hostPlay">Play</button>
         <button id="hostPause">Pause</button>
         <button id="hostNext">Next</button>
+        <button id="toggleLoop">Loop: On</button>
       </div>
 
       <div class="list" id="queue"></div>
