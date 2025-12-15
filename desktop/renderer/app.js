@@ -9,7 +9,7 @@ let queue = [];
 let nowPlaying = null;
 
 // unified music panel state
-let musicSource = localStorage.getItem("syncsong:lastSource") || "itunes"; // "itunes" | "spotify"
+let musicSource = localStorage.getItem("syncsong:lastSource") || "itunes"; // "itunes" | "spotify | "apple"
 let playlists = [];      // [{id,name}]
 let tracks = [];         // unified track objects
 let tracksFiltered = [];
@@ -184,6 +184,13 @@ const LAST_SOURCE_KEY = "syncsong:lastSource";
 const LAST_ITUNES_PLAYLIST_KEY = "syncsong:lastItunesPlaylistIndex";
 const LAST_SPOTIFY_PLAYLIST_KEY = "syncsong:lastSpotifyPlaylistId";
 
+const LAST_APPLE_PLAYLIST_KEY = "syncsong:lastApplePlaylistId";
+const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
+const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
+
+// IMPORTANT: set this to your server endpoint that returns { token: "..." }
+const APPLE_DEV_TOKEN_URL = "https://syncsong-2lxp.onrender.com/apple/dev-token";
+
 // Spotify token helpers (renderer-side API calls)
 function getSpotifyAccessToken() {
   const tok = localStorage.getItem("spotify:access_token") || "";
@@ -207,13 +214,12 @@ async function spotifyFetch(path) {
 }
 
 function renderMusicTabs() {
-  const itBtn = el("sourceItunes");
-  const spBtn = el("sourceSpotify");
-  if (itBtn) itBtn.classList.toggle("active", musicSource === "itunes");
-  if (spBtn) spBtn.classList.toggle("active", musicSource === "spotify");
+  el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
+  el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
+  el("sourceApple")?.classList.toggle("active", musicSource === "apple");
 
-  const spConnect = el("connectSpotify");
-  if (spConnect) spConnect.style.display = (musicSource === "spotify") ? "inline-block" : "none";
+  el("connectSpotify").style.display = (musicSource === "spotify") ? "inline-block" : "none";
+  el("connectApple").style.display = (musicSource === "apple") ? "inline-block" : "none";
 }
 
 function renderLoopToggle() {
@@ -249,6 +255,7 @@ function renderMusicPlaylists() {
   let desired = null;
   if (musicSource === "itunes") desired = localStorage.getItem(LAST_ITUNES_PLAYLIST_KEY);
   if (musicSource === "spotify") desired = localStorage.getItem(LAST_SPOTIFY_PLAYLIST_KEY);
+  if (musicSource === "apple") desired = localStorage.getItem(LAST_APPLE_PLAYLIST_KEY);
 
   const exists = desired && playlists.some(p => String(p.id) === String(desired));
   const initialId = exists ? String(desired) : String(playlists[0].id);
@@ -378,18 +385,110 @@ async function loadSpotifyTracks(playlistId) {
   applySearch();
 }
 
-async function reloadMusic() {
-  try {
-    clearMusicPanel();
+async function loadApplePlaylistsAndTracks() {
+  await ensureAppleConfigured();
 
-    if (musicSource === "itunes") {
-      await loadItunesPlaylistsAndTracks();
-    } else {
-      await loadSpotifyPlaylistsAndTracks();
-    }
-  } catch (e) {
-    el("sessionMeta").textContent = e?.message || String(e);
+  if (!getAppleUserToken()) {
+    playlists = [];
+    tracks = [];
+    renderMusicPlaylists();
+    applySearch();
+    el("sessionMeta").textContent = "Click “Connect Apple” to load your library playlists.";
+    return;
   }
+
+  const data = await appleFetch("/me/library/playlists?limit=100");
+  const pls = data.data || [];
+
+  playlists = pls.map(p => ({
+    id: p.id,
+    name: p.attributes?.name || "Untitled",
+  }));
+
+  renderMusicPlaylists();
+
+  const selId = el("musicPlaylists")?.value;
+  if (selId) await loadAppleTracks(selId);
+}
+
+async function loadAppleTracks(playlistId) {
+  localStorage.setItem(LAST_APPLE_PLAYLIST_KEY, String(playlistId));
+
+  const data = await appleFetch(`/me/library/playlists/${playlistId}/tracks?limit=100`);
+  const items = data.data || [];
+
+  tracks = items.map(t => ({
+    id: cryptoRandomId(),        // use whatever you use today for queue ids
+    source: "apple",
+    title: t.attributes?.name || "Unknown",
+    artist: t.attributes?.artistName || "Unknown",
+    album: t.attributes?.albumName || "",
+    durationMs: t.attributes?.durationInMillis || 0,
+    appleMusicUrl: t.attributes?.url || "",  // web URL that we will open externally
+    appleId: t.id,
+  }));
+
+  applySearch();
+}
+
+
+// Apple Music helper functions
+
+function getAppleUserToken() {
+  return localStorage.getItem(APPLE_USER_TOKEN_KEY) || null;
+}
+
+async function fetchAppleDeveloperToken() {
+  const res = await fetch(APPLE_DEV_TOKEN_URL);
+  if (!res.ok) throw new Error("Failed to fetch Apple developer token");
+  const json = await res.json();
+  if (!json?.token) throw new Error("Apple developer token missing from server response");
+  localStorage.setItem(APPLE_DEV_TOKEN_KEY, json.token);
+  return json.token;
+}
+
+async function ensureAppleConfigured() {
+  // MusicKit script is loaded via index.html
+  if (!window.MusicKit) throw new Error("MusicKit not loaded. Check CSP + script tag.");
+
+  let devToken = localStorage.getItem(APPLE_DEV_TOKEN_KEY);
+  if (!devToken) devToken = await fetchAppleDeveloperToken();
+
+  if (!window.__appleConfigured) {
+    window.MusicKit.configure({
+      developerToken: devToken,
+      app: { name: "SyncSong", build: "1.0.0" },
+    });
+    window.__appleConfigured = true;
+  }
+  return window.MusicKit.getInstance();
+}
+
+async function appleFetch(path) {
+  const devToken = localStorage.getItem(APPLE_DEV_TOKEN_KEY);
+  const userToken = getAppleUserToken();
+  if (!devToken) throw new Error("Apple dev token missing. Click Connect Apple.");
+  if (!userToken) throw new Error("Apple not authorized. Click Connect Apple.");
+
+  const res = await fetch(`https://api.music.apple.com/v1${path}`, {
+    headers: {
+      Authorization: `Bearer ${devToken}`,
+      "Music-User-Token": userToken,
+    },
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.errors?.[0]?.detail || `Apple Music API error: ${res.status}`;
+    throw new Error(msg);
+  }
+  return json;
+}
+
+async function reloadMusic() {
+  if (musicSource === "itunes") return loadItunesPlaylistsAndTracks();
+  if (musicSource === "spotify") return loadSpotifyPlaylistsAndTracks();
+  return loadApplePlaylistsAndTracks();
 }
 
 function setSource(next) {
@@ -480,6 +579,17 @@ async function hostPlayQueueItem(qItem) {
   if (qItem.track.source === "spotify") {
     const ok = await window.api.openExternal(qItem.track.spotifyUri);
     if (!ok && qItem.track.spotifyUrl) await window.api.openExternal(qItem.track.spotifyUrl);
+  }
+
+  // Apple Music track: we can't control playback via API yet; open locally
+  if (qItem.track.source === "apple") {
+    const url = qItem.track.appleMusicUrl;
+    if (!url) {
+      el("sessionMeta").textContent = "Apple Music URL missing for this track.";
+      return;
+    }
+    const ok = await window.api.openExternal(url);
+    if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
   }
 
   // Set nowPlaying immediately (polling refines for iTunes)
@@ -657,17 +767,21 @@ function wireUi() {
   // Source toggle + reload
   el("sourceItunes")?.addEventListener("click", () => setSource("itunes"));
   el("sourceSpotify")?.addEventListener("click", () => setSource("spotify"));
+  el("sourceApple")?.addEventListener("click", async () => {
+    musicSource = "apple";
+    localStorage.setItem("syncsong:lastSource", musicSource);
+    renderMusicTabs();
+    await reloadMusic();
+  });
+
   el("reloadMusic")?.addEventListener("click", reloadMusic);
 
   // Playlist change
-  el("musicPlaylists")?.addEventListener("change", async (e) => {
-    const id = e.target.value;
-    try {
-      if (musicSource === "itunes") await loadItunesTracks(id);
-      else await loadSpotifyTracks(id);
-    } catch (err) {
-      el("sessionMeta").textContent = err?.message || String(err);
-    }
+  el("musicPlaylists")?.addEventListener("change", async () => {
+    const id = el("musicPlaylists").value;
+    if (musicSource === "itunes") await loadItunesTracks(id);
+    else if (musicSource === "spotify") await loadSpotifyTracks(id);
+    else await loadAppleTracks(id);
   });
 
   // Search
@@ -751,6 +865,20 @@ function wireUi() {
       el("sessionMeta").textContent = "Spotify connect failed: " + (e?.message || String(e));
     }
   });
+
+  // Apple Music connect
+  el("connectApple")?.addEventListener("click", async () => {
+    try {
+      const mk = await ensureAppleConfigured();
+      const userToken = await mk.authorize(); // triggers Apple sign-in
+      localStorage.setItem(APPLE_USER_TOKEN_KEY, userToken);
+      el("sessionMeta").textContent = "Apple Music connected!";
+      await reloadMusic();
+    } catch (e) {
+      el("sessionMeta").textContent = "Apple connect failed: " + (e?.message || String(e));
+    }
+  });
+
 }
 
 // ---------- Boot ----------
