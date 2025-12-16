@@ -79,20 +79,20 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
 
-// iTunes IPC
-ipcMain.handle("itunes:available", async () => itunes.itunesAvailable());
-ipcMain.handle("itunes:nowPlaying", async () => itunes.getNowPlaying());
-ipcMain.handle("itunes:playFromPlaylist", async (_e, playlistIndex, trackIndex) =>
-  itunes.playFromPlaylist(playlistIndex, trackIndex)
-);
-// ipcMain.handle("itunes:playByPersistentId", async (_e, pid) => itunes.playByPersistentId(pid));
-// ipcMain.handle("itunes:playByDatabaseId", async (_e, dbId) => itunes.playByDatabaseId(dbId));
-// ipcMain.handle("itunes:playByTrackId", async (_e, trackId) => itunes.playByTrackId(trackId));
-ipcMain.handle("itunes:pause", async () => (await itunes.pause(), true));
-ipcMain.handle("itunes:play", async () => (await itunes.play(), true));
-ipcMain.handle("itunes:next", async () => (await itunes.nextTrack(), true));
-ipcMain.handle("itunes:listPlaylists", async () => itunes.listPlaylists());
-ipcMain.handle("itunes:listTracks", async (_e, playlistIndex) => itunes.listTracksByIndex(playlistIndex));
+// // iTunes IPC
+// ipcMain.handle("itunes:available", async () => itunes.itunesAvailable());
+// ipcMain.handle("itunes:nowPlaying", async () => itunes.getNowPlaying());
+// ipcMain.handle("itunes:playFromPlaylist", async (_e, playlistIndex, trackIndex) =>
+//   itunes.playFromPlaylist(playlistIndex, trackIndex)
+// );
+// // ipcMain.handle("itunes:playByPersistentId", async (_e, pid) => itunes.playByPersistentId(pid));
+// // ipcMain.handle("itunes:playByDatabaseId", async (_e, dbId) => itunes.playByDatabaseId(dbId));
+// // ipcMain.handle("itunes:playByTrackId", async (_e, trackId) => itunes.playByTrackId(trackId));
+// ipcMain.handle("itunes:pause", async () => (await itunes.pause(), true));
+// ipcMain.handle("itunes:play", async () => (await itunes.play(), true));
+// ipcMain.handle("itunes:next", async () => (await itunes.nextTrack(), true));
+// ipcMain.handle("itunes:listPlaylists", async () => itunes.listPlaylists());
+// ipcMain.handle("itunes:listTracks", async (_e, playlistIndex) => itunes.listTracksByIndex(playlistIndex));
 
 
 function b64url(buf) {
@@ -102,6 +102,7 @@ function b64url(buf) {
 function sha256(str) {
   return crypto.createHash("sha256").update(str).digest();
 }
+
 
 // Spotify IPC 
 ipcMain.handle("app:openExternal", async (_e, url) => {
@@ -115,73 +116,109 @@ ipcMain.handle("app:openExternal", async (_e, url) => {
 });
 
 ipcMain.handle("spotify:connect", async () => {
-  const clientId = SPOTIFY_CLIENT_ID; // or process.env.SPOTIFY_CLIENT_ID
-  if (!clientId) throw new Error("Missing Spotify Client ID");
+  console.log("[spotify] connect start");
+  try {
+    const clientId = SPOTIFY_CLIENT_ID; // or process.env.SPOTIFY_CLIENT_ID
+    if (!clientId) throw new Error("Missing Spotify Client ID");
 
-  const verifier = b64url(crypto.randomBytes(32));
-  const challenge = b64url(sha256(verifier));
+    const verifier = b64url(crypto.randomBytes(32));
+    const challenge = b64url(sha256(verifier));
 
-  const port = 53682;
-  const redirectUri = `http://127.0.0.1:${port}/callback`;
+    const port = 53682;
+    const redirectUri = `http://127.0.0.1:${port}/callback`;
 
-  const scopes = [
-    "playlist-read-private",
-    "playlist-read-collaborative",
-  ].join(" ");
+    const scopes = [
+      "playlist-read-private",
+      "playlist-read-collaborative",
 
-  const authUrl =
-    "https://accounts.spotify.com/authorize" +
-    `?client_id=${encodeURIComponent(clientId)}` +
-    `&response_type=code` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&code_challenge_method=S256` +
-    `&code_challenge=${encodeURIComponent(challenge)}` +
-    `&scope=${encodeURIComponent(scopes)}`;
+      // Web Playback SDK + controlling playback:
+      "streaming",
+      "user-modify-playback-state",
+      "user-read-playback-state",
+    ].join(" ");
 
-  const code = await new Promise((resolve, reject) => {
-    const server = http.createServer((req, res) => {
-      if (!req.url || !req.url.startsWith("/callback")) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
 
-      const u = new URL(`http://127.0.0.1:${port}${req.url}`);
-      
-      const c = u.searchParams.get("code");
-      const err = u.searchParams.get("error");
+    const authUrl =
+      "https://accounts.spotify.com/authorize" +
+      `?client_id=${encodeURIComponent(clientId)}` +
+      `&response_type=code` +
+      `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+      `&code_challenge_method=S256` +
+      `&code_challenge=${encodeURIComponent(challenge)}` +
+      `&scope=${encodeURIComponent(scopes)}` +
+      `&show_dialog=true`;
 
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(`<h3>${c ? "Spotify connected. You can close this tab." : "Spotify auth failed."}</h3>`);
+    console.log("[spotify] opening auth url", authUrl);
 
-      server.close();
+    const code = await new Promise((resolve, reject) => {
+      const server = http.createServer((req, res) => {
+        try {
+          if (!req.url || !req.url.startsWith("/callback")) {
+            res.writeHead(404);
+            res.end();
+            return;
+          }
 
-      if (err) reject(new Error(err));
-      else resolve(c);
+          const u = new URL(`http://127.0.0.1:${port}${req.url}`);
+          
+          const c = u.searchParams.get("code");
+          const err = u.searchParams.get("error");
+
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(`<h3>${c ? "Spotify connected. You can close this tab." : "Spotify auth failed."}</h3>`);
+
+          server.close();
+
+          if (err) return reject(new Error(err));
+          return resolve(c);
+        } catch (ex) {
+          console.error('[spotify] callback handler exception', ex && ex.stack ? ex.stack : ex);
+          try { server.close(); } catch (__) {}
+          reject(ex);
+        }
+      });
+
+      server.listen(port, "127.0.0.1", () => {
+        shell.openExternal(authUrl);
+      });
     });
 
-    server.listen(port, "127.0.0.1", () => {
-      shell.openExternal(authUrl);
+    console.log('[spotify] got code', code ? 'yes' : 'no');
+
+    // Exchange code for tokens
+    const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: clientId,
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+      }),
     });
-  });
 
-  // Exchange code for tokens
-  const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: verifier,
-    }),
-  });
+    const tokenJson = await tokenRes.json();
+    console.log('[spotify] token exchange status', tokenRes.status, 'body', tokenJson);
 
-  const tokenJson = await tokenRes.json();
-  if (!tokenRes.ok) {
-    throw new Error(tokenJson.error_description || "Spotify token exchange failed");
+    if (!tokenRes.ok) {
+      throw new Error(tokenJson.error_description || "Spotify token exchange failed");
+    }
+    
+    // Return a plain, minimal object instead of the raw parsed object to avoid
+    // any prototype/getter issues when serializing over IPC
+    const tokenResult = {
+      access_token: tokenJson.access_token,
+      refresh_token: tokenJson.refresh_token,
+      expires_in: tokenJson.expires_in,
+      token_type: tokenJson.token_type,
+      scope: tokenJson.scope,
+    };
+
+    console.log("[spotify] granted scopes:", tokenResult.scope);
+    return tokenResult; // access_token, refresh_token, expires_in, token_type, scope
+  } catch (err) {
+    console.error('[spotify] connect error', err && err.stack ? err.stack : err);
+    throw err;
   }
-
-  return tokenJson; // access_token, refresh_token, expires_in, token_type, scope
 });
