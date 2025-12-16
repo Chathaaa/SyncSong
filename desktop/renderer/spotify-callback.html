@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Spotify Callback</title>
+  </head>
+  <body>
+    <script type="module">
+      const params = new URLSearchParams(location.search);
+      const code = params.get("code");
+      const error = params.get("error");
+      const returnedState = params.get("state");
+
+      try {
+        if (error) throw new Error(error);
+        if (!code) throw new Error("Missing code");
+
+        const verifier = localStorage.getItem("spotify:pkce_verifier");
+        const clientId = localStorage.getItem("spotify:client_id");
+        const redirectUri = localStorage.getItem("spotify:redirect_uri");
+        const expectedState = localStorage.getItem("spotify:oauth_state");
+
+        if (!verifier || !clientId || !redirectUri) {
+          throw new Error("Missing PKCE session values (open Connect Spotify again).");
+        }
+        if (expectedState && returnedState !== expectedState) {
+          throw new Error("State mismatch. Please try connecting again.");
+        }
+
+        const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: clientId,
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: redirectUri,
+            code_verifier: verifier,
+          }),
+        });
+
+        const tok = await tokenRes.json();
+        if (!tokenRes.ok) throw new Error(tok?.error_description || "Token exchange failed");
+
+        // Optional: store here too (useful when same-origin)
+        localStorage.setItem("spotify:access_token", tok.access_token || "");
+        localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
+        localStorage.setItem("spotify:expires_at", String(Date.now() + (tok.expires_in || 0) * 1000));
+
+        // Send to opener (main app)
+        window.opener?.postMessage({ type: "spotify:token", token: tok }, "*");
+
+        document.body.innerHTML = "<h3>Spotify connected. You can close this window.</h3>";
+      } catch (e) {
+        document.body.innerHTML = `<h3>Spotify auth failed: ${String(e?.message || e)}</h3>`;
+      }
+    </script>
+
+  </body>
+</html>

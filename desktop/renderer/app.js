@@ -13,7 +13,7 @@ let queue = [];
 let nowPlaying = null;
 
 // unified music panel state
-let musicSource = localStorage.getItem("syncsong:lastSource") || "itunes"; // "itunes" | "spotify | "apple"
+let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "itunes" | "spotify | "apple"
 let playlists = [];      // [{id,name}]
 let tracks = [];         // unified track objects
 let tracksFiltered = [];
@@ -39,6 +39,8 @@ const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
 
 const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
 let playbackSource = localStorage.getItem(PLAYBACK_SOURCE_KEY) || "apple";
+
+const isWeb = typeof window.api === "undefined";
 
 // UI helpers
 const el = (id) => document.getElementById(id);
@@ -205,7 +207,7 @@ function connectWS() {
 // ---------- Music panel rendering + loading ----------
 
 function renderMusicTabs() {
-  el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
+  //el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
   el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
   el("sourceApple")?.classList.toggle("active", musicSource === "apple");
 
@@ -309,6 +311,11 @@ function renderMusicTracks() {
 }
 
 async function loadItunesPlaylistsAndTracks() {
+  
+  if (isWeb) {
+    throw new Error("iTunes is only available in the desktop app.");
+  }
+
   const ok = await window.api.itunes.available();
   if (!ok) throw new Error("iTunes not found. Please install iTunes.");
 
@@ -821,27 +828,69 @@ function wireUi() {
     await playNextInSharedQueue();
   });
 
+  window.addEventListener("message", (event) => {
+    // Security: only accept messages from our own origin
+    if (event.origin !== window.location.origin) return;
+
+    const msg = event.data;
+    if (!msg || msg.type !== "spotify:token" || !msg.token) return;
+
+    const tok = msg.token;
+
+    localStorage.setItem("spotify:access_token", tok.access_token || "");
+    localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
+    localStorage.setItem(
+      "spotify:expires_at",
+      String(Date.now() + (tok.expires_in || 0) * 1000)
+    );
+
+    console.log("[spotify] token received via postMessage");
+  });
+
   // Spotify connect
+  function waitForSpotifyToken({ timeoutMs = 60_000 } = {}) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+
+      const timer = setInterval(() => {
+        const tok = localStorage.getItem("spotify:access_token");
+        if (tok) {
+          clearInterval(timer);
+          resolve(tok);
+        } else if (Date.now() - t0 > timeoutMs) {
+          clearInterval(timer);
+          reject(new Error("Timed out waiting for Spotify token."));
+        }
+      }, 200);
+    });
+  }
+
   el("connectSpotify")?.addEventListener("click", async () => {
     try {
-      const tok = await window.api.spotifyConnect();
-      console.log('[spotify] connect result', tok);
-      // defensive checks/logging to capture assignment issues
-      if (!tok || typeof tok !== 'object') throw new Error('Invalid token response from spotify:connect');
-      try {
-        // store tokens (may throw if localStorage implementation broken)
+      const ipcSpotifyConnect = window?.api?.spotifyConnect;
+
+      // Electron path (unchanged)
+      if (typeof ipcSpotifyConnect === "function") {
+        const tok = await ipcSpotifyConnect();
         localStorage.setItem("spotify:access_token", tok.access_token);
         localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
         localStorage.setItem("spotify:expires_at", String(Date.now() + tok.expires_in * 1000));
-      } catch (storageErr) {
-        console.error('[spotify] error storing tokens', storageErr && storageErr.stack ? storageErr.stack : storageErr);
-        throw storageErr;
+        el("sessionMeta").textContent = "Spotify connected!";
+        await reloadMusic();
+        return;
       }
 
+      // Web path
+      el("sessionMeta").textContent = "Opening Spotify authorization...";
+      await import("./providers/spotify.js").then((m) => m.spotifyWebConnect());
+
+      // IMPORTANT: wait for callback to store token before using Spotify API
+      await waitForSpotifyToken();
       el("sessionMeta").textContent = "Spotify connected!";
       await reloadMusic();
+
     } catch (e) {
-      console.error('[spotify] connect failed (renderer)', e && e.stack ? e.stack : e);
+      console.error("[spotify] connect failed", e);
       el("sessionMeta").textContent = "Spotify connect failed: " + (e?.message || String(e));
     }
   });

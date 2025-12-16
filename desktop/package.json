@@ -3,12 +3,13 @@
   "private": true,
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "dev": "vite"
   },
   "dependencies": {
     "jose": "^6.1.3"
   },
   "devDependencies": {
-    "electron": "github:castlabs/electron-releases#v39.0.0+wvcus"
+    "electron": "github:castlabs/electron-releases#v39.0.0+wvcus",
+    "vite": "^7.3.0"
   }
 }

@@ -46,6 +46,7 @@ export async function spotifyApi(path, opts = {}) {
 
 let spotifyPlayer = null;
 let spotifyDeviceId = null;
+let deviceReadyPromise = null;
 
 export async function spotifyTransferToThisAppDevice() {
   if (!spotifyDeviceId) return;
@@ -63,6 +64,21 @@ window.onSpotifyWebPlaybackSDKReady = () => {
   console.log("[spotify] Web Playback SDK ready");
 };
 
+function waitForDeviceId({ timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if (spotifyDeviceId) {
+        clearInterval(timer);
+        resolve(spotifyDeviceId);
+      } else if (Date.now() - t0 > timeoutMs) {
+        clearInterval(timer);
+        reject(new Error("Spotify device_id not ready yet."));
+      }
+    }, 100);
+  });
+}
+
 export async function ensureSpotifyWebPlayer() {
   if (spotifyPlayer) return spotifyPlayer;
 
@@ -75,21 +91,17 @@ export async function ensureSpotifyWebPlayer() {
 
   spotifyPlayer = new window.Spotify.Player({
     name: "SyncSong (In-App)",
-    getOAuthToken: (cb) => {
-      const t = getSpotifyAccessToken();
-      cb(t || "");
-    },
-    volume: 0.8
+    getOAuthToken: (cb) => cb(getSpotifyAccessToken() || ""),
+    volume: 0.8,
   });
 
-  spotifyPlayer.addListener("ready", async ({ device_id }) => {
-    spotifyDeviceId = device_id;
-    console.log("[spotify] ready device_id=", device_id);
-    try {
-      await spotifyTransferToThisAppDevice();
-    } catch (e) {
-      console.warn("[spotify] transfer failed:", e);
-    }
+  deviceReadyPromise = deviceReadyPromise || new Promise((resolve) => {
+    spotifyPlayer.addListener("ready", async ({ device_id }) => {
+      spotifyDeviceId = device_id;
+      console.log("[spotify] ready device_id=", device_id);
+      try { await spotifyTransferToThisAppDevice(); } catch (e) { console.warn("[spotify] transfer failed:", e); }
+      resolve(device_id);
+    });
   });
 
   spotifyPlayer.addListener("not_ready", ({ device_id }) => {
@@ -97,10 +109,9 @@ export async function ensureSpotifyWebPlayer() {
     if (spotifyDeviceId === device_id) spotifyDeviceId = null;
   });
 
-  spotifyPlayer.addListener("initialization_error", ({ message }) => console.error("[spotify] init error", message));
-  spotifyPlayer.addListener("authentication_error", ({ message }) => console.error("[spotify] auth error", message));
-  spotifyPlayer.addListener("account_error", ({ message }) => console.error("[spotify] account error", message));
-  spotifyPlayer.addListener("playback_error", ({ message }) => console.error("[spotify] playback error", message));
+  spotifyPlayer.addListener("authentication_error", ({ message }) =>
+    console.error("[spotify] auth error", message)
+  );
 
   const ok = await spotifyPlayer.connect();
   if (!ok) throw new Error("Spotify player connect() failed.");
@@ -112,13 +123,14 @@ export async function spotifyPlayUriInApp(spotifyUri) {
   if (!spotifyUri) throw new Error("Missing spotifyUri on track.");
 
   await ensureSpotifyWebPlayer();
+  await (deviceReadyPromise || waitForDeviceId()); // <- wait for ready
+
   if (!spotifyDeviceId) throw new Error("Spotify device_id not ready yet.");
 
-  // PUT /me/player/play?device_id=...
   await spotifyApi(`/me/player/play?device_id=${encodeURIComponent(spotifyDeviceId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ uris: [spotifyUri] })
+    body: JSON.stringify({ uris: [spotifyUri] }),
   });
 }
 
@@ -180,4 +192,57 @@ export async function spotifyFindUriForTrack(track) {
     items[0];
 
   return best?.uri || null;
+}
+
+export async function spotifyWebConnect() {
+  const SPOTIFY_CLIENT_ID = "e87ab2180d5a438ba6f23670e3c12f3d"; // same one you use in Electron
+  const redirectUri = `${window.location.origin}/spotify-callback.html`;
+
+  // PKCE
+  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+  const verifier = btoa(String.fromCharCode(...verifierBytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+
+  async function sha256(str) {
+    const data = new TextEncoder().encode(str);
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    return new Uint8Array(digest);
+  }
+
+  function b64url(bytes) {
+    return btoa(String.fromCharCode(...bytes))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  }
+
+  const challenge = b64url(await sha256(verifier));
+
+  const state = Math.random().toString(16).slice(2) + Date.now().toString(16);
+
+  localStorage.setItem("spotify:pkce_verifier", verifier);
+  localStorage.setItem("spotify:client_id", SPOTIFY_CLIENT_ID);
+  localStorage.setItem("spotify:redirect_uri", redirectUri);
+  localStorage.setItem("spotify:oauth_state", state);
+
+  const scopes = [
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "streaming",
+    "user-modify-playback-state",
+    "user-read-playback-state",
+  ].join(" ");
+
+  const authUrl =
+    "https://accounts.spotify.com/authorize" +
+    `?client_id=${encodeURIComponent(SPOTIFY_CLIENT_ID)}` +
+    `&response_type=code` +
+    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
+    `&code_challenge_method=S256` +
+    `&code_challenge=${encodeURIComponent(challenge)}` +
+    `&scope=${encodeURIComponent(scopes)}` +
+    `&state=${encodeURIComponent(state)}` +
+    `&show_dialog=true`;
+
+  // Popup window
+  const w = window.open(authUrl, "spotify_auth", "width=520,height=680");
+  if (!w) throw new Error("Popup blocked. Allow popups and try again.");
 }
