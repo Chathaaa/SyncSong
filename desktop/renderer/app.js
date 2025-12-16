@@ -1,5 +1,9 @@
 const WS_URL = "wss://syncsong-2lxp.onrender.com";
 
+// Import renderer-side providers (keeps app.js slim)
+import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
+import { APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken, ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized, appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext } from "./providers/apple.js";
+
 let ws;
 let userId = null;
 let sessionId = null;
@@ -9,7 +13,7 @@ let queue = [];
 let nowPlaying = null;
 
 // unified music panel state
-let musicSource = localStorage.getItem("syncsong:lastSource") || "itunes"; // "itunes" | "spotify | "apple"
+let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "itunes" | "spotify | "apple"
 let playlists = [];      // [{id,name}]
 let tracks = [];         // unified track objects
 let tracksFiltered = [];
@@ -23,6 +27,20 @@ let pendingCreate = false;
 // playback behavior
 let loopQueue = true; // default
 let autoAdvanceLock = false;
+
+// ---------- Unified music panel ----------
+const LAST_SOURCE_KEY = "syncsong:lastSource";
+const LAST_ITUNES_PLAYLIST_KEY = "syncsong:lastItunesPlaylistIndex";
+const LAST_SPOTIFY_PLAYLIST_KEY = "syncsong:lastSpotifyPlaylistId";
+
+const LAST_APPLE_PLAYLIST_KEY = "syncsong:lastApplePlaylistId";
+const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
+const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
+
+const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
+let playbackSource = localStorage.getItem(PLAYBACK_SOURCE_KEY) || "apple";
+
+const isWeb = typeof window.api === "undefined";
 
 // UI helpers
 const el = (id) => document.getElementById(id);
@@ -153,6 +171,7 @@ function connectWS() {
       renderSessionMeta();
       renderQueue();
       renderNowPlaying();
+      syncClientToNowPlaying();
       return;
     }
 
@@ -165,6 +184,7 @@ function connectWS() {
     if (msg.type === "nowPlaying:updated") {
       nowPlaying = msg.nowPlaying || null;
       renderNowPlaying();
+      syncClientToNowPlaying();
       return;
     }
 
@@ -179,42 +199,15 @@ function connectWS() {
   };
 }
 
-// ---------- Unified music panel ----------
-const LAST_SOURCE_KEY = "syncsong:lastSource";
-const LAST_ITUNES_PLAYLIST_KEY = "syncsong:lastItunesPlaylistIndex";
-const LAST_SPOTIFY_PLAYLIST_KEY = "syncsong:lastSpotifyPlaylistId";
+// Apple developer token endpoint is provided by ./providers/apple.js
 
-const LAST_APPLE_PLAYLIST_KEY = "syncsong:lastApplePlaylistId";
-const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
-const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
+// Spotify renderer helpers are moved to ./providers/spotify.js
+// See: renderer/providers/spotify.js
 
-// IMPORTANT: set this to your server endpoint that returns { token: "..." }
-const APPLE_DEV_TOKEN_URL = "https://syncsong-2lxp.onrender.com/apple/dev-token";
-
-// Spotify token helpers (renderer-side API calls)
-function getSpotifyAccessToken() {
-  const tok = localStorage.getItem("spotify:access_token") || "";
-  const exp = Number(localStorage.getItem("spotify:expires_at") || "0");
-  if (!tok) return null;
-  if (exp && Date.now() > exp - 10_000) return null;
-  return tok;
-}
-
-async function spotifyFetch(path) {
-  const token = getSpotifyAccessToken();
-  if (!token) throw new Error("Spotify not connected (or token expired). Click Connect Spotify.");
-
-  const res = await fetch(`https://api.spotify.com/v1${path}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error?.message || `Spotify API error: ${res.status}`);
-  return json;
-}
+// ---------- Music panel rendering + loading ----------
 
 function renderMusicTabs() {
-  el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
+  //el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
   el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
   el("sourceApple")?.classList.toggle("active", musicSource === "apple");
 
@@ -294,16 +287,23 @@ function renderMusicTracks() {
         </div>
         <div class="actions">
             <button data-add="${t.id}">+ Add</button>
-            <button data-open="${t.id}" ${t.source === "spotify" ? "" : "disabled"}>Open</button>
+            <button data-open="${t.id}" ${(t.source === "spotify" || t.source === "apple") ? "" : "disabled"}>Open</button>
         </div>
         `;
 
     row.querySelector("[data-add]").addEventListener("click", () => addToQueue(t));
 
+    const canOpen = (t.source === "spotify" && t.spotifyUri) || (t.source === "apple" && t.url);
+
+    row.querySelector("[data-open]").toggleAttribute("disabled", !canOpen);
+
     row.querySelector("[data-open]").addEventListener("click", async () => {
-    if (t.source !== "spotify") return;
-    const ok = await window.api.openExternal(t.spotifyUri);
-    if (!ok && t.spotifyUrl) await window.api.openExternal(t.spotifyUrl);
+      if (t.source === "spotify") {
+        const ok = await window.api.openExternal(t.spotifyUri);
+        if (!ok && t.spotifyUrl) await window.api.openExternal(t.spotifyUrl);
+      } else if (t.source === "apple") {
+        //await window.api.openExternal(t.url);
+      }
     });
 
     box.appendChild(row);
@@ -311,6 +311,11 @@ function renderMusicTracks() {
 }
 
 async function loadItunesPlaylistsAndTracks() {
+  
+  if (isWeb) {
+    throw new Error("iTunes is only available in the desktop app.");
+  }
+
   const ok = await window.api.itunes.available();
   if (!ok) throw new Error("iTunes not found. Please install iTunes.");
 
@@ -347,143 +352,63 @@ async function loadItunesTracks(playlistIndex) {
   applySearch();
 }
 
+// Spotify playlist/track helpers moved to providers/spotify.js
 async function loadSpotifyPlaylistsAndTracks() {
-  const tok = getSpotifyAccessToken();
-  if (!tok) throw new Error("Spotify not connected. Click Connect Spotify.");
-
-  const data = await spotifyFetch("/me/playlists?limit=50");
-  const pls = data.items || [];
-
-  playlists = pls.map(p => ({ id: p.id, name: p.name }));
+  const { playlists: pls } = await import("./providers/spotify.js").then(m => m.loadSpotifyPlaylistsAndTracks());
+  // app.js maintains the UI state
+  playlists = pls;
   renderMusicPlaylists();
-
   const selId = el("musicPlaylists").value;
-  await loadSpotifyTracks(selId);
+  if (selId) {
+    const { tracks: t } = await import("./providers/spotify.js").then(m => m.loadSpotifyTracks(selId));
+    tracks = t;
+    applySearch();
+  }
 }
 
 async function loadSpotifyTracks(playlistId) {
-  localStorage.setItem(LAST_SPOTIFY_PLAYLIST_KEY, String(playlistId));
-
-  const data = await spotifyFetch(`/playlists/${playlistId}/tracks?limit=100`);
-  const items = data.items || [];
-
-  tracks = items
-    .map(it => it.track)
-    .filter(Boolean)
-    .map(t => ({
-      id: cryptoRandomId(),
-      source: "spotify",
-      title: t.name,
-      artist: t.artists?.[0]?.name || "Unknown",
-      album: t.album?.name || "",
-      durationMs: t.duration_ms || 0,
-      spotifyTrackId: t.id,
-      spotifyUri: t.uri,
-      spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
-    }));
-
+  const { tracks: t } = await import("./providers/spotify.js").then(m => m.loadSpotifyTracks(playlistId));
+  tracks = t;
   applySearch();
 }
 
-async function loadApplePlaylistsAndTracks() {
-  await ensureAppleConfigured();
+async function spotifyFindUriForTrack(track) {
+  const { spotifyFindUriForTrack: _find } = await import("./providers/spotify.js");
+  return _find(track);
+}
 
-  if (!getAppleUserToken()) {
+// Apple playlist/track helpers moved to providers/apple.js
+async function loadApplePlaylistsAndTracks() {
+  const { playlists: pls, note } = await import("./providers/apple.js").then(m => m.loadApplePlaylistsAndTracks());
+
+  if (note) {
     playlists = [];
     tracks = [];
     renderMusicPlaylists();
     applySearch();
-    el("sessionMeta").textContent = "Click “Connect Apple” to load your library playlists.";
+    el("sessionMeta").textContent = note;
     return;
   }
 
-  const data = await appleFetch("/me/library/playlists?limit=100");
-  const pls = data.data || [];
-
-  playlists = pls.map(p => ({
-    id: p.id,
-    name: p.attributes?.name || "Untitled",
-  }));
-
+  playlists = pls;
   renderMusicPlaylists();
-
   const selId = el("musicPlaylists")?.value;
   if (selId) await loadAppleTracks(selId);
 }
 
 async function loadAppleTracks(playlistId) {
-  localStorage.setItem(LAST_APPLE_PLAYLIST_KEY, String(playlistId));
-
-  const data = await appleFetch(`/me/library/playlists/${playlistId}/tracks?limit=100`);
-  const items = data.data || [];
-
-  tracks = items.map(t => ({
-    id: cryptoRandomId(),        // use whatever you use today for queue ids
-    source: "apple",
-    title: t.attributes?.name || "Unknown",
-    artist: t.attributes?.artistName || "Unknown",
-    album: t.attributes?.albumName || "",
-    durationMs: t.attributes?.durationInMillis || 0,
-    appleMusicUrl: t.attributes?.url || "",  // web URL that we will open externally
-    appleId: t.id,
-  }));
-
+  const { tracks: t } = await import("./providers/apple.js").then(m => m.loadAppleTracks(playlistId));
+  tracks = t;
   applySearch();
 }
 
 
-// Apple Music helper functions
+// Apple renderer helpers have been moved to ./providers/apple.js
+// See: renderer/providers/apple.js
 
-function getAppleUserToken() {
-  return localStorage.getItem(APPLE_USER_TOKEN_KEY) || null;
-}
 
-async function fetchAppleDeveloperToken() {
-  const res = await fetch(APPLE_DEV_TOKEN_URL);
-  if (!res.ok) throw new Error("Failed to fetch Apple developer token");
-  const json = await res.json();
-  if (!json?.token) throw new Error("Apple developer token missing from server response");
-  localStorage.setItem(APPLE_DEV_TOKEN_KEY, json.token);
-  return json.token;
-}
 
-async function ensureAppleConfigured() {
-  // MusicKit script is loaded via index.html
-  if (!window.MusicKit) throw new Error("MusicKit not loaded. Check CSP + script tag.");
-
-  let devToken = localStorage.getItem(APPLE_DEV_TOKEN_KEY);
-  if (!devToken) devToken = await fetchAppleDeveloperToken();
-
-  if (!window.__appleConfigured) {
-    window.MusicKit.configure({
-      developerToken: devToken,
-      app: { name: "SyncSong", build: "1.0.0" },
-    });
-    window.__appleConfigured = true;
-  }
-  return window.MusicKit.getInstance();
-}
-
-async function appleFetch(path) {
-  const devToken = localStorage.getItem(APPLE_DEV_TOKEN_KEY);
-  const userToken = getAppleUserToken();
-  if (!devToken) throw new Error("Apple dev token missing. Click Connect Apple.");
-  if (!userToken) throw new Error("Apple not authorized. Click Connect Apple.");
-
-  const res = await fetch(`https://api.music.apple.com/v1${path}`, {
-    headers: {
-      Authorization: `Bearer ${devToken}`,
-      "Music-User-Token": userToken,
-    },
-  });
-
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg = json?.errors?.[0]?.detail || `Apple Music API error: ${res.status}`;
-    throw new Error(msg);
-  }
-  return json;
-}
+// ---------- Music reload ----------
 
 async function reloadMusic() {
   if (musicSource === "itunes") return loadItunesPlaylistsAndTracks();
@@ -557,42 +482,7 @@ async function hostPlayQueueItem(qItem) {
 
   autoAdvanceLock = false;
 
-  // iTunes track: play via COM
-  if (qItem.track.source === "itunes") {
-    const pIdx = qItem.track.itunesPlaylistIndex;
-    const tIdx = qItem.track.itunesPlaylistTrackIndex;
-
-    if (!pIdx || !tIdx) {
-      el("sessionMeta").textContent =
-        "This track can't be played (missing playlist/track index). Reload playlist and try again.";
-      return;
-    }
-
-    const ok = await window.api.itunes.playFromPlaylist(pIdx, tIdx);
-    if (!ok) {
-      el("sessionMeta").textContent = "Could not start playback in iTunes.";
-      return;
-    }
-  }
-
-  // Spotify track: we can't control playback via Spotify API yet; open locally
-  if (qItem.track.source === "spotify") {
-    const ok = await window.api.openExternal(qItem.track.spotifyUri);
-    if (!ok && qItem.track.spotifyUrl) await window.api.openExternal(qItem.track.spotifyUrl);
-  }
-
-  // Apple Music track: we can't control playback via API yet; open locally
-  if (qItem.track.source === "apple") {
-    const url = qItem.track.appleMusicUrl;
-    if (!url) {
-      el("sessionMeta").textContent = "Apple Music URL missing for this track.";
-      return;
-    }
-    const ok = await window.api.openExternal(url);
-    if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
-  }
-
-  // Set nowPlaying immediately (polling refines for iTunes)
+  // Broadcast the shared state (everyone plays it on their chosen platform)
   nowPlaying = {
     queueId: qItem.queueId,
     track: qItem.track,
@@ -601,8 +491,12 @@ async function hostPlayQueueItem(qItem) {
     startedAt: Date.now(),
     updatedAt: Date.now()
   };
+
   send("host:state", { sessionId, nowPlaying });
   renderNowPlaying();
+
+  // Optional: let the host ALSO listen on their chosen source
+  await syncClientToNowPlaying();
 }
 
 async function playNextInSharedQueue() {
@@ -635,6 +529,68 @@ async function playNextInSharedQueue() {
   await hostPlayQueueItem(queue[nextIdx]);
 }
 
+async function syncAppleClientToNowPlaying() {
+  if (!nowPlaying?.track || nowPlaying.track.source !== "apple") return;
+
+  // Only apply if this is a new update
+  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${nowPlaying.isPlaying ? "1" : "0"}`;
+  if (key === lastAppliedNowPlayingKey) return;
+  lastAppliedNowPlayingKey = key;
+
+  try {
+    if (nowPlaying.isPlaying) {
+      // Play the track inside the app (MusicKit)
+      await applePlayTrack(nowPlaying.track);
+    } else {
+      await applePause();
+    }
+  } catch (e) {
+    el("sessionMeta").textContent = `Apple sync error: ${e?.message || String(e)}`;
+  }
+}
+
+let lastClientPlayedKey = "";
+
+async function playTrackOnMySource(track) {
+  if (!track) return;
+
+  if (playbackSource === "apple") {
+    await applePlayTrack(track);
+    return;
+  }
+
+  if (playbackSource === "spotify") {
+    const uri = await spotifyFindUriForTrack(track);
+    if (!uri) throw new Error("Could not find this track on Spotify via search.");
+    await spotifyPlayUriInApp(uri);
+    return;
+  }
+}
+
+async function syncClientToNowPlaying() {
+  if (!nowPlaying?.track) return;
+
+  // If host marks paused, we can pause Apple; Spotify can’t be controlled here (only opened)
+  if (!nowPlaying.isPlaying) {
+    if (playbackSource === "apple") {
+      try { await applePause(); } catch {}
+    }
+    return;
+  }
+
+  // Prevent replay loops on repeated broadcasts
+  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${playbackSource}`;
+  if (key === lastClientPlayedKey) return;
+  lastClientPlayedKey = key;
+
+  try {
+    await playTrackOnMySource(nowPlaying.track);
+  } catch (e) {
+    el("sessionMeta").textContent = `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
+  }
+}
+
+
 // ---------- Now playing UI ----------
 function computeExpectedPlayhead(np) {
   if (!np) return 0;
@@ -660,11 +616,17 @@ function renderNowPlaying() {
 
   box.querySelector(".npTitle").textContent = `${t.title}`;
   box.querySelector(".npMeta").textContent =
-    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : "iTunes"}`;
+    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : t.source === "apple" ? "Apple Music" : "iTunes"}`;
 
   const pct = t.durationMs ? Math.max(0, Math.min(1, playhead / t.durationMs)) : 0;
   bar.style.width = `${pct * 100}%`;
 }
+
+function renderPlaybackSource() {
+    const sel = el("playbackSource");
+    if (!sel) return;
+    sel.value = playbackSource;
+  }
 
 // ---------- Host polling (iTunes only) ----------
 let lastPos = null;
@@ -817,8 +779,22 @@ function wireUi() {
 
     // If spotify track, "play" just opens it
     if (nowPlaying?.track?.source === "spotify") {
-      const ok = await window.api.openExternal(nowPlaying.track.spotifyUri);
-      if (!ok && nowPlaying.track.spotifyUrl) await window.api.openExternal(nowPlaying.track.spotifyUrl);
+      try {
+        const uri = await spotifyFindUriForTrack(nowPlaying.track);
+        if (!uri) throw new Error("Could not find this track on Spotify via search.");
+        await spotifyPlayUriInApp(uri);
+      } catch (e) {
+        el("sessionMeta").textContent =
+          "Spotify in-app playback failed: " + (e?.message || String(e));
+        return;
+      }
+    }
+
+    // If apple track, "play" just opens it
+    if (nowPlaying?.track?.source === "apple") {
+      console.log("[debug] ignoring hostPlay for apple (no openExternal, no resume)");
+      //const ok = await window.api.openExternal(nowPlaying.track.url);
+      // if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
       return;
     }
 
@@ -852,16 +828,69 @@ function wireUi() {
     await playNextInSharedQueue();
   });
 
+  window.addEventListener("message", (event) => {
+    // Security: only accept messages from our own origin
+    if (event.origin !== window.location.origin) return;
+
+    const msg = event.data;
+    if (!msg || msg.type !== "spotify:token" || !msg.token) return;
+
+    const tok = msg.token;
+
+    localStorage.setItem("spotify:access_token", tok.access_token || "");
+    localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
+    localStorage.setItem(
+      "spotify:expires_at",
+      String(Date.now() + (tok.expires_in || 0) * 1000)
+    );
+
+    console.log("[spotify] token received via postMessage");
+  });
+
   // Spotify connect
+  function waitForSpotifyToken({ timeoutMs = 60_000 } = {}) {
+    return new Promise((resolve, reject) => {
+      const t0 = Date.now();
+
+      const timer = setInterval(() => {
+        const tok = localStorage.getItem("spotify:access_token");
+        if (tok) {
+          clearInterval(timer);
+          resolve(tok);
+        } else if (Date.now() - t0 > timeoutMs) {
+          clearInterval(timer);
+          reject(new Error("Timed out waiting for Spotify token."));
+        }
+      }, 200);
+    });
+  }
+
   el("connectSpotify")?.addEventListener("click", async () => {
     try {
-      const tok = await window.api.spotifyConnect();
-      localStorage.setItem("spotify:access_token", tok.access_token);
-      localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
-      localStorage.setItem("spotify:expires_at", String(Date.now() + tok.expires_in * 1000));
+      const ipcSpotifyConnect = window?.api?.spotifyConnect;
+
+      // Electron path (unchanged)
+      if (typeof ipcSpotifyConnect === "function") {
+        const tok = await ipcSpotifyConnect();
+        localStorage.setItem("spotify:access_token", tok.access_token);
+        localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
+        localStorage.setItem("spotify:expires_at", String(Date.now() + tok.expires_in * 1000));
+        el("sessionMeta").textContent = "Spotify connected!";
+        await reloadMusic();
+        return;
+      }
+
+      // Web path
+      el("sessionMeta").textContent = "Opening Spotify authorization...";
+      await import("./providers/spotify.js").then((m) => m.spotifyWebConnect());
+
+      // IMPORTANT: wait for callback to store token before using Spotify API
+      await waitForSpotifyToken();
       el("sessionMeta").textContent = "Spotify connected!";
       await reloadMusic();
+
     } catch (e) {
+      console.error("[spotify] connect failed", e);
       el("sessionMeta").textContent = "Spotify connect failed: " + (e?.message || String(e));
     }
   });
@@ -879,6 +908,14 @@ function wireUi() {
     }
   });
 
+  el("playbackSource")?.addEventListener("change", async () => {
+    playbackSource = el("playbackSource").value;
+    localStorage.setItem(PLAYBACK_SOURCE_KEY, playbackSource);
+
+    // If something is currently playing, re-sync immediately
+    await syncClientToNowPlaying();
+  });
+
 }
 
 // ---------- Boot ----------
@@ -887,5 +924,6 @@ wireUi();
 renderMusicTabs();
 renderLoopToggle();
 renderShareButton();
+renderPlaybackSource();
 setSource(musicSource);
 startHostPolling();
