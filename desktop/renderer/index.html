@@ -5,11 +5,12 @@
   <meta http-equiv="Content-Security-Policy"
     content="
       default-src 'self';
-      connect-src 'self' wss: https: https://api.music.apple.com;
+      connect-src 'self' https: wss: https://api.music.apple.com;
       img-src 'self' data: https:;
       style-src 'self' 'unsafe-inline';
       script-src 'self' https://js-cdn.music.apple.com;
       frame-src https://appleid.apple.com;
+      media-src 'self' blob: data: https://audio-ssl.itunes.apple.com https://audio.itunes.apple.com https://*.mzstatic.com https://*.apple.com;
     ">
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="styles.css" />

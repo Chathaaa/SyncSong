@@ -153,6 +153,7 @@ function connectWS() {
       renderSessionMeta();
       renderQueue();
       renderNowPlaying();
+      syncAppleClientToNowPlaying();
       return;
     }
 
@@ -165,6 +166,7 @@ function connectWS() {
     if (msg.type === "nowPlaying:updated") {
       nowPlaying = msg.nowPlaying || null;
       renderNowPlaying();
+      syncAppleClientToNowPlaying();
       return;
     }
 
@@ -294,16 +296,23 @@ function renderMusicTracks() {
         </div>
         <div class="actions">
             <button data-add="${t.id}">+ Add</button>
-            <button data-open="${t.id}" ${t.source === "spotify" ? "" : "disabled"}>Open</button>
+            <button data-open="${t.id}" ${(t.source === "spotify" || t.source === "apple") ? "" : "disabled"}>Open</button>
         </div>
         `;
 
     row.querySelector("[data-add]").addEventListener("click", () => addToQueue(t));
 
+    const canOpen = (t.source === "spotify" && t.spotifyUri) || (t.source === "apple" && t.url);
+
+    row.querySelector("[data-open]").toggleAttribute("disabled", !canOpen);
+
     row.querySelector("[data-open]").addEventListener("click", async () => {
-    if (t.source !== "spotify") return;
-    const ok = await window.api.openExternal(t.spotifyUri);
-    if (!ok && t.spotifyUrl) await window.api.openExternal(t.spotifyUrl);
+      if (t.source === "spotify") {
+        const ok = await window.api.openExternal(t.spotifyUri);
+        if (!ok && t.spotifyUrl) await window.api.openExternal(t.spotifyUrl);
+      } else if (t.source === "apple") {
+        //await window.api.openExternal(t.url);
+      }
     });
 
     box.appendChild(row);
@@ -417,17 +426,37 @@ async function loadAppleTracks(playlistId) {
   const data = await appleFetch(`/me/library/playlists/${playlistId}/tracks?limit=100`);
   const items = data.data || [];
 
-  tracks = items.map(t => ({
-    id: cryptoRandomId(),        // use whatever you use today for queue ids
-    source: "apple",
-    title: t.attributes?.name || "Unknown",
-    artist: t.attributes?.artistName || "Unknown",
-    album: t.attributes?.albumName || "",
-    durationMs: t.attributes?.durationInMillis || 0,
-    appleMusicUrl: t.attributes?.url || "",  // web URL that we will open externally
-    appleId: t.id,
-  }));
+  function appleFallbackUrlFromTrack(t) {
+    const name = t.attributes?.name || "";
+    const artist = t.attributes?.artistName || "";
+    const q = encodeURIComponent(`${name} ${artist}`.trim());
+    // Always works even when library track has no url
+    return q ? `https://music.apple.com/search?term=${q}` : "";
+  }
 
+  tracks = items.map(t => {
+    const directUrl = t.attributes?.url || "";
+
+    return {
+      id: cryptoRandomId(),
+      source: "apple",
+      sourceId: t.id,
+
+      title: t.attributes?.name || "Unknown",
+      artist: t.attributes?.artistName || "Unknown",
+      album: t.attributes?.albumName || "",
+      durationMs: t.attributes?.durationInMillis || 0,
+
+      // ✅ prefer API url, otherwise fall back to a search URL
+      url: directUrl || appleFallbackUrlFromTrack(t),
+
+      catalogId: "", // <-- we will resolve this when we need to play
+
+      artworkUrl: t.attributes?.artwork?.url
+        ? t.attributes.artwork.url.replace("{w}", "120").replace("{h}", "120")
+        : "",
+    };
+  });
   applySearch();
 }
 
@@ -484,6 +513,79 @@ async function appleFetch(path) {
   }
   return json;
 }
+
+// --- Apple playback state ---
+const appleCatalogIdCache = new Map(); // key: sourceId -> catalogSongId
+let lastAppliedNowPlayingKey = "";     // prevents loops on repeated state messages
+
+async function appleEnsureAuthorized() {
+  const mk = await ensureAppleConfigured();
+  if (!getAppleUserToken()) {
+    // If not authorized yet, this will pop the sign-in
+    const userToken = await mk.authorize();
+    localStorage.setItem(APPLE_USER_TOKEN_KEY, userToken);
+  }
+  return mk;
+}
+
+// Catalog endpoints do NOT require Music-User-Token, only Developer Token
+async function appleCatalogFetch(path) {
+  const devToken = localStorage.getItem(APPLE_DEV_TOKEN_KEY);
+  if (!devToken) throw new Error("Apple dev token missing.");
+  const res = await fetch(`https://api.music.apple.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${devToken}` }
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.errors?.[0]?.detail || `Apple catalog error: ${res.status}`);
+  return json;
+}
+
+// Resolve a playable catalog song id from a track (cache results)
+async function appleResolveCatalogSongId(track) {
+  if (track.catalogId) return track.catalogId;
+  if (appleCatalogIdCache.has(track.sourceId)) return appleCatalogIdCache.get(track.sourceId);
+
+  const mk = await appleEnsureAuthorized();
+  const storefront = mk.storefrontId || "us";
+
+  const term = encodeURIComponent(`${track.title} ${track.artist}`.trim());
+  const data = await appleCatalogFetch(`/catalog/${storefront}/search?types=songs&limit=5&term=${term}`);
+
+  const song = data?.results?.songs?.data?.[0];
+  const catalogId = song?.id || "";
+
+  if (!catalogId) throw new Error("Could not resolve Apple catalog song id (search returned nothing).");
+
+  appleCatalogIdCache.set(track.sourceId, catalogId);
+  track.catalogId = catalogId; // also mutate local track object for reuse
+  return catalogId;
+}
+
+async function applePlayTrack(track) {
+  const mk = await appleEnsureAuthorized();
+  const catalogId = await appleResolveCatalogSongId(track);
+
+  // Replace queue with a single song and start playing
+  await mk.setQueue({ song: catalogId, startPlaying: true });
+}
+
+async function applePause() {
+  const mk = await appleEnsureAuthorized();
+  mk.pause();
+}
+
+async function applePlay() {
+  const mk = await appleEnsureAuthorized();
+  mk.play();
+}
+
+async function appleNext() {
+  const mk = await appleEnsureAuthorized();
+  mk.skipToNextItem();
+}
+
+
+// ---------- Music reload ----------
 
 async function reloadMusic() {
   if (musicSource === "itunes") return loadItunesPlaylistsAndTracks();
@@ -583,13 +685,12 @@ async function hostPlayQueueItem(qItem) {
 
   // Apple Music track: we can't control playback via API yet; open locally
   if (qItem.track.source === "apple") {
-    const url = qItem.track.appleMusicUrl;
-    if (!url) {
-      el("sessionMeta").textContent = "Apple Music URL missing for this track.";
+    try {
+      await applePlayTrack(qItem.track);
+    } catch (e) {
+      el("sessionMeta").textContent = "Apple playback failed: " + (e?.message || String(e));
       return;
     }
-    const ok = await window.api.openExternal(url);
-    if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
   }
 
   // Set nowPlaying immediately (polling refines for iTunes)
@@ -635,6 +736,27 @@ async function playNextInSharedQueue() {
   await hostPlayQueueItem(queue[nextIdx]);
 }
 
+async function syncAppleClientToNowPlaying() {
+  if (!nowPlaying?.track || nowPlaying.track.source !== "apple") return;
+
+  // Only apply if this is a new update
+  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${nowPlaying.isPlaying ? "1" : "0"}`;
+  if (key === lastAppliedNowPlayingKey) return;
+  lastAppliedNowPlayingKey = key;
+
+  try {
+    if (nowPlaying.isPlaying) {
+      // Play the track inside the app (MusicKit)
+      await applePlayTrack(nowPlaying.track);
+    } else {
+      await applePause();
+    }
+  } catch (e) {
+    el("sessionMeta").textContent = `Apple sync error: ${e?.message || String(e)}`;
+  }
+}
+
+
 // ---------- Now playing UI ----------
 function computeExpectedPlayhead(np) {
   if (!np) return 0;
@@ -660,7 +782,7 @@ function renderNowPlaying() {
 
   box.querySelector(".npTitle").textContent = `${t.title}`;
   box.querySelector(".npMeta").textContent =
-    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : "iTunes"}`;
+    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : t.source === "apple" ? "Apple Music" : "iTunes"}`;
 
   const pct = t.durationMs ? Math.max(0, Math.min(1, playhead / t.durationMs)) : 0;
   bar.style.width = `${pct * 100}%`;
@@ -819,6 +941,14 @@ function wireUi() {
     if (nowPlaying?.track?.source === "spotify") {
       const ok = await window.api.openExternal(nowPlaying.track.spotifyUri);
       if (!ok && nowPlaying.track.spotifyUrl) await window.api.openExternal(nowPlaying.track.spotifyUrl);
+      return;
+    }
+
+    // If apple track, "play" just opens it
+    if (nowPlaying?.track?.source === "apple") {
+      console.log("[debug] ignoring hostPlay for apple (no openExternal, no resume)");
+      //const ok = await window.api.openExternal(nowPlaying.track.url);
+      // if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
       return;
     }
 

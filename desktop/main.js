@@ -1,14 +1,59 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const path = require("path");
-const itunes = require("./providers/itunes");
-
-const { shell } = require("electron");
+const fs = require("fs");
 const http = require("http");
 const crypto = require("crypto");
+const itunes = require("./providers/itunes");
+const { shell } = require("electron");
 
-const SPOTIFY_CLIENT_ID = "e87ab2180d5a438ba6f23670e3c12f3d"
+const SPOTIFY_CLIENT_ID = "e87ab2180d5a438ba6f23670e3c12f3d";
 
-function createWindow() {
+function startStaticRendererServer() {
+  const rendererDir = path.join(__dirname, "renderer");
+
+  const server = http.createServer((req, res) => {
+    const urlPath = (req.url || "/").split("?")[0];
+    const cleanPath = urlPath === "/" ? "/index.html" : urlPath;
+
+    // Prevent path traversal
+    const filePath = path.join(rendererDir, cleanPath);
+    if (!filePath.startsWith(rendererDir)) {
+      res.writeHead(403);
+      res.end("forbidden");
+      return;
+    }
+
+    fs.readFile(filePath, (err, data) => {
+      if (err) {
+        res.writeHead(404);
+        res.end("not found");
+        return;
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      const type =
+        ext === ".html" ? "text/html; charset=utf-8" :
+        ext === ".js"   ? "application/javascript; charset=utf-8" :
+        ext === ".css"  ? "text/css; charset=utf-8" :
+        "application/octet-stream";
+
+      res.writeHead(200, { "Content-Type": type });
+      res.end(data);
+    });
+  });
+
+  return new Promise((resolve) => {
+    const RENDERER_PORT = Number(process.env.RENDERER_PORT || 12121);
+
+    server.listen(RENDERER_PORT, "127.0.0.1", () => {
+      resolve({ server, port: RENDERER_PORT });
+    });
+  });
+}
+
+async function createWindow() {
+  const { server, port } = await startStaticRendererServer();
+
   const win = new BrowserWindow({
     width: 1100,
     height: 720,
@@ -16,10 +61,16 @@ function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // optional but helps keep cookies/session stable:
+      partition: "persist:syncsong",
     },
   });
 
-  win.loadFile(path.join(__dirname, "renderer", "index.html"));
+  win.on("closed", () => {
+    try { server.close(); } catch {}
+  });
+
+  win.loadURL(`http://127.0.0.1:${port}/index.html`);
 }
 
 app.whenReady().then(createWindow);
