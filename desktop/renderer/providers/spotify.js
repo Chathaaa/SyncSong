@@ -213,31 +213,33 @@ export async function loadSpotifyTracks(playlistId) {
       durationMs: t.duration_ms || 0,
       spotifyTrackId: t.id,
       spotifyUri: t.uri,
-      spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
+      //spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
+      artworkUrl: t.album?.images?.[0]?.url || "",
+
     }));
 
   return { tracks };
 }
 
 export async function spotifyFindUriForTrack(track) {
-  // If the shared track already IS spotify and has uri, easy:
   if (track.source === "spotify" && track.spotifyUri) return track.spotifyUri;
 
-  // Otherwise search by title + artist:
+  // If ISRC exists, this is the best match
+  if (track.isrc) {
+    const q = encodeURIComponent(`isrc:${track.isrc}`);
+    const res = await spotifyFetch(`/search?type=track&limit=1&q=${q}`);
+    const hit = res?.tracks?.items?.[0];
+    if (hit?.uri) return hit.uri;
+  }
+
+  // Fallback: title + artist (your existing behavior)
   const q = encodeURIComponent(`${track.title} ${track.artist}`.trim());
   const res = await spotifyFetch(`/search?type=track&limit=5&q=${q}`);
 
   const items = res?.tracks?.items || [];
   if (!items.length) return null;
 
-  // Pick best match (very simple heuristic)
-  const tTitle = norm(track.title);
-  const tArtist = norm(track.artist);
-
-  const best =
-    items.find(x => norm(x.name) === tTitle && norm(x.artists?.[0]?.name) === tArtist) ||
-    items[0];
-
+  const best = items[0];
   return best?.uri || null;
 }
 
