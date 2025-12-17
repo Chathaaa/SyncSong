@@ -2,6 +2,53 @@
 // Exports useful functions the app uses: getSpotifyAccessToken, spotifyFetch, spotifyApi,
 // ensureSpotifyWebPlayer, spotifyPlayUriInApp
 
+const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
+
+function getStoredClientId() {
+  return localStorage.getItem("spotify:client_id") || "e87ab2180d5a438ba6f23670e3c12f3d";
+}
+
+function tokenIsValidSoon() {
+  const tok = localStorage.getItem("spotify:access_token") || "";
+  const exp = Number(localStorage.getItem("spotify:expires_at") || "0");
+  if (!tok) return false;
+  // treat as expired if within 60s of expiry
+  return !exp || Date.now() < exp - 60_000;
+}
+
+export async function spotifyRefreshAccessToken() {
+  const refreshToken = localStorage.getItem("spotify:refresh_token") || "";
+  if (!refreshToken) throw new Error("No Spotify refresh token (need to connect once).");
+
+  const clientId = getStoredClientId();
+
+  const res = await fetch(SPOTIFY_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error_description || "Spotify refresh failed");
+
+  // Spotify may not return refresh_token on refresh; keep the old one.
+  if (json.access_token) localStorage.setItem("spotify:access_token", json.access_token);
+  if (json.expires_in) localStorage.setItem("spotify:expires_at", String(Date.now() + json.expires_in * 1000));
+  if (json.refresh_token) localStorage.setItem("spotify:refresh_token", json.refresh_token);
+
+  return json.access_token;
+}
+
+export async function spotifyEnsureAccessToken() {
+  if (tokenIsValidSoon()) return localStorage.getItem("spotify:access_token");
+  // try silent refresh
+  return spotifyRefreshAccessToken();
+}
+
 export function getSpotifyAccessToken() {
   const tok = localStorage.getItem("spotify:access_token") || "";
   const exp = Number(localStorage.getItem("spotify:expires_at") || "0");
@@ -20,8 +67,8 @@ function cryptoRandomId() {
 }
 
 export async function spotifyFetch(path, opts = {}) {
-  const token = getSpotifyAccessToken();
-  if (!token) throw new Error("Spotify not connected (or token expired). Click Connect Spotify.");
+  const token = await spotifyEnsureAccessToken();
+  if (!token) throw new Error("Spotify not connected. Click Connect Spotify.");
 
   const res = await fetch(`https://api.spotify.com/v1${path}`, {
     method: opts.method || "GET",
@@ -245,4 +292,37 @@ export async function spotifyWebConnect() {
   // Popup window
   const w = window.open(authUrl, "spotify_auth", "width=520,height=680");
   if (!w) throw new Error("Popup blocked. Allow popups and try again.");
+}
+
+
+export async function spotifyPlay() {
+  const p = await ensureSpotifyWebPlayer();
+  await p.resume();
+}
+
+export async function spotifyPause() {
+  const p = await ensureSpotifyWebPlayer();
+  await p.pause();
+}
+
+export async function spotifySeek(seconds) {
+  const p = await ensureSpotifyWebPlayer();
+  // SDK expects milliseconds
+  await p.seek(Math.max(0, Math.floor(seconds * 1000)));
+}
+
+export async function spotifyNext() {
+  await ensureSpotifyWebPlayer(); // ensure device exists/active
+  await spotifyApi("/me/player/next", { method: "POST" });
+}
+
+export async function spotifyPrev() {
+  await ensureSpotifyWebPlayer();
+  await spotifyApi("/me/player/previous", { method: "POST" });
+}
+
+// Helpful for UI progress + play state
+export async function spotifyGetPlaybackState() {
+  const p = await ensureSpotifyWebPlayer();
+  return p.getCurrentState(); // { paused, position, duration, track_window, ... } or null
 }

@@ -34,12 +34,60 @@ button { height:34px; border-radius:10px; border:1px solid #334155; background:#
   cursor: default;
 }
 
-.nowPlaying { border:1px solid #1f2937; border-radius:12px; padding:10px; background:#0b1220; margin-bottom:10px; }
-.npTitle { font-weight:700; }
+.nowPlaying {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(20,20,20,0.6);
+  backdrop-filter: blur(10px);
+}
+
+.npTop { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.npInfo { display:flex; align-items:center; gap:10px; min-width: 0; }
+.npArt { width:44px; height:44px; border-radius:10px; object-fit:cover; background:#111; }
+.npText { min-width:0; }
+.npTitle { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.npSub { color:#94a3b8; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.npControls { display:flex; gap:8px; align-items:center; }
+.npBtn {
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  border-radius: 999px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.npBtn:disabled { opacity: .45; cursor: not-allowed; }
+.npPrimary { padding: 8px 14px; }
+
+.npBottom { margin-top: 10px; }
+.npTime { display:flex; justify-content:space-between; color:#94a3b8; font-size:12px; margin-bottom:6px; }
+
+.npProgress {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.10);
+  cursor: pointer;
+}
+.npBar {
+  position:absolute; left:0; top:0; bottom:0;
+  width: 0%;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.85);
+}
+.npThumb {
+  position:absolute; top:50%;
+  width: 14px; height: 14px;
+  border-radius: 999px;
+  background: #fff;
+  transform: translate(-50%, -50%);
+  left: 0%;
+  box-shadow: 0 2px 12px rgba(0,0,0,.4);
+}
+
 .npMeta { color:#94a3b8; font-size:12px; margin-top:4px; }
-.npProgress { height:8px; background:#111827; border:1px solid #1f2937; border-radius:999px; margin-top:8px; overflow:hidden; }
-.npProgress .bar { height:100%; width:0%; background:#22c55e; } /* you can change later */
-.hostControls { display:flex; gap:8px; margin-bottom:10px; }
 
 .tab { opacity: 0.7; }
 .tab.active { opacity: 1; font-weight: 600; }
@@ -88,4 +136,10 @@ html, body {
   min-height: 0;     /* critical */
   scrollbar-width: thin;
   scrollbar-color: #333 transparent;
+}
+
+.hostControls {
+  margin-top: 8px;
+  margin-bottom: 8px;
+
 }

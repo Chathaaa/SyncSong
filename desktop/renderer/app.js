@@ -3,6 +3,17 @@ const WS_URL = "wss://syncsong-2lxp.onrender.com";
 // Import renderer-side providers (keeps app.js slim)
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
 import { APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken, ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized, appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext } from "./providers/apple.js";
+import { makeControls } from "./controls.js";
+
+const controls = makeControls({
+  getPlaybackSource: () => playbackSource,
+  getNowPlaying: () => nowPlaying,
+  onNextShared: () => playNextInSharedQueue(),
+  onPrevShared: () => playPrevInSharedQueue(),
+});
+
+const { playerPlay, playerPause, playerSeek, playerNext, playerPrev } = controls;
+
 
 let ws;
 let userId = null;
@@ -17,6 +28,8 @@ let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "
 let playlists = [];      // [{id,name}]
 let tracks = [];         // unified track objects
 let tracksFiltered = [];
+let lastLoadedQueueKey = ""; // queueId:playbackSource
+
 
 let currentItunesPlaylistIndex = null;
 
@@ -27,6 +40,9 @@ let pendingCreate = false;
 // playback behavior
 let loopQueue = true; // default
 let autoAdvanceLock = false;
+let isScrubbing = false;
+let scrubWasPlaying = false;
+
 
 // ---------- Unified music panel ----------
 const LAST_SOURCE_KEY = "syncsong:lastSource";
@@ -46,8 +62,9 @@ const isWeb = typeof window.api === "undefined";
 const el = (id) => document.getElementById(id);
 
 function send(type, payload) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify({ type, payload }));
+  return true;
 }
 
 function escapeHtml(s) {
@@ -134,6 +151,7 @@ function connectWS() {
 
   ws.onopen = () => {
     el("sessionMeta").textContent = "Connected";
+    pendingCreate = false; // allow session:create to be attempted again
   };
 
   ws.onmessage = (e) => {
@@ -429,12 +447,26 @@ function ensureSessionForAdd(track) {
 
   pendingAddTrack = track;
 
+  // If we're not connected yet, don't lock pendingCreate forever
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    el("sessionMeta").textContent = "Connecting… try again in a moment.";
+    return false;
+  }
+
   if (!pendingCreate) {
     pendingCreate = true;
     const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
-    send("session:create", { displayName });
-    el("sessionMeta").textContent = "Creating session...";
+
+    const ok = send("session:create", { displayName });
+    if (!ok) {
+      pendingCreate = false; // allow retries
+      el("sessionMeta").textContent = "Couldn’t create session (not connected).";
+      return false;
+    }
+
+    el("sessionMeta").textContent = "Creating session…";
   }
+
   return false;
 }
 
@@ -529,25 +561,40 @@ async function playNextInSharedQueue() {
   await hostPlayQueueItem(queue[nextIdx]);
 }
 
-async function syncAppleClientToNowPlaying() {
-  if (!nowPlaying?.track || nowPlaying.track.source !== "apple") return;
+async function playPrevInSharedQueue() {
+  const isHost = userId && hostUserId && userId === hostUserId;
+  if (!isHost) return;
+  if (!queue.length) return;
 
-  // Only apply if this is a new update
-  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${nowPlaying.isPlaying ? "1" : "0"}`;
-  if (key === lastAppliedNowPlayingKey) return;
-  lastAppliedNowPlayingKey = key;
-
-  try {
-    if (nowPlaying.isPlaying) {
-      // Play the track inside the app (MusicKit)
-      await applePlayTrack(nowPlaying.track);
-    } else {
-      await applePause();
-    }
-  } catch (e) {
-    el("sessionMeta").textContent = `Apple sync error: ${e?.message || String(e)}`;
+  if (!nowPlaying?.queueId) {
+    await hostPlayQueueItem(queue[0]);
+    return;
   }
+
+  const idx = queue.findIndex(q => q.queueId === nowPlaying.queueId);
+  const prevIdx = idx <= 0 ? (loopQueue ? queue.length - 1 : 0) : idx - 1;
+  await hostPlayQueueItem(queue[prevIdx]);
 }
+
+// async function syncAppleClientToNowPlaying() {
+//   if (!nowPlaying?.track || nowPlaying.track.source !== "apple") return;
+
+//   // Only apply if this is a new update
+//   const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${nowPlaying.isPlaying ? "1" : "0"}`;
+//   if (key === lastAppliedNowPlayingKey) return;
+//   lastAppliedNowPlayingKey = key;
+
+//   try {
+//     if (nowPlaying.isPlaying) {
+//       // Play the track inside the app (MusicKit)
+//       await applePlayTrack(nowPlaying.track);
+//     } else {
+//       await applePause();
+//     }
+//   } catch (e) {
+//     el("sessionMeta").textContent = `Apple sync error: ${e?.message || String(e)}`;
+//   }
+// }
 
 let lastClientPlayedKey = "";
 
@@ -562,71 +609,156 @@ async function playTrackOnMySource(track) {
   if (playbackSource === "spotify") {
     const uri = await spotifyFindUriForTrack(track);
     if (!uri) throw new Error("Could not find this track on Spotify via search.");
+
     await spotifyPlayUriInApp(uri);
+    startSpotifyStateSync();
     return;
   }
 }
+
 
 async function syncClientToNowPlaying() {
   if (!nowPlaying?.track) return;
 
-  // If host marks paused, we can pause Apple; Spotify can’t be controlled here (only opened)
+  const loadKey = `${nowPlaying.queueId}:${playbackSource}`;
+
+  // If paused: pause locally (Apple + Spotify if you have SDK wired)
   if (!nowPlaying.isPlaying) {
-    if (playbackSource === "apple") {
-      try { await applePause(); } catch {}
-    }
+    try { await playerPause(); } catch {}
     return;
   }
 
-  // Prevent replay loops on repeated broadcasts
-  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${playbackSource}`;
-  if (key === lastClientPlayedKey) return;
-  lastClientPlayedKey = key;
+  // If same track already loaded, just resume (don't restart)
+  if (loadKey === lastLoadedQueueKey) {
+    try { await playerPlay(); } catch {}
+    return;
+  }
+
+  // New track: load/open it once
+  lastLoadedQueueKey = loadKey;
 
   try {
     await playTrackOnMySource(nowPlaying.track);
   } catch (e) {
-    el("sessionMeta").textContent = `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
+    el("sessionMeta").textContent =
+      `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
   }
 }
 
 
+
+let spotifyStateTimer = null;
+
+async function startSpotifyStateSync() {
+  stopSpotifyStateSync();
+  spotifyStateTimer = setInterval(async () => {
+    try {
+      const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
+      const s = await spotifyGetPlaybackState();
+      if (!s) return;
+    
+      // Update unified UI
+      if (playbackSource !== "spotify") return;
+      if (!nowPlaying?.track) return;
+      if (isScrubbing) return;
+      const dur = Number(s.duration || 0);
+      const pos = Number(s.position || 0);
+      const paused = !!s.paused;
+
+      nowPlaying = {
+        ...nowPlaying,
+        isPlaying: !paused,
+        playheadMs: pos,
+        startedAt: Date.now(),     // ✅ snapshot time for this base
+        // keep whatever track metadata you already have
+      };
+
+      // do NOT broadcast client polling
+      renderNowPlaying();
+    } catch {}
+  }, 500);
+}
+
+function stopSpotifyStateSync() {
+  if (spotifyStateTimer) clearInterval(spotifyStateTimer);
+  spotifyStateTimer = null;
+}
+
 // ---------- Now playing UI ----------
 function computeExpectedPlayhead(np) {
   if (!np) return 0;
-  if (!np.isPlaying) return np.playheadMs || 0;
-  const startedAt = np.startedAt || Date.now();
-  return Math.max(0, Date.now() - startedAt);
+
+  const base = Number(np.playheadMs ?? 0);
+
+  // While paused, freeze at playheadMs
+  if (!np.isPlaying) return Math.max(0, base);
+
+  // While playing, advance from playheadMs using startedAt as the moment
+  // playback resumed (startedAt = Date.now() - playheadMs at resume time).
+  const startedAt = Number(np.startedAt ?? Date.now());
+  const elapsed = Date.now() - startedAt;
+
+  return Math.max(0, base + elapsed);
 }
 
 function renderNowPlaying() {
   const box = el("nowPlaying");
-  const bar = el("npBar");
-  if (!box || !bar) return;
+  if (!box) return;
+  if (isScrubbing) return; // don't fight the user
 
-  if (!nowPlaying) {
-    box.querySelector(".npTitle").textContent = "Not playing";
-    box.querySelector(".npMeta").textContent = "";
-    bar.style.width = "0%";
+  // Prefer IDs (matches your current index.html)
+  const titleEl = el("npTitle") || box.querySelector(".npTitle");
+  const subEl   = el("npSub")   || box.querySelector(".npSub") || box.querySelector(".npMeta");
+  const barEl   = el("npBar")   || box.querySelector("#npBar") || box.querySelector(".bar");
+  const ppBtn = el("npPlayPause");
+  const posEl = el("npPos");
+  const durEl = el("npDur");
+
+  if (!titleEl || !barEl) return; // don't crash the app if markup changes
+
+  if (!nowPlaying?.track) {
+    titleEl.textContent = "Not playing";
+    if (subEl) subEl.textContent = "";
+    barEl.style.width = "0%";
     return;
   }
 
   const t = nowPlaying.track;
   const playhead = computeExpectedPlayhead(nowPlaying);
 
-  box.querySelector(".npTitle").textContent = `${t.title}`;
-  box.querySelector(".npMeta").textContent =
-    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : t.source === "apple" ? "Apple Music" : "iTunes"}`;
+  if (posEl) posEl.textContent = fmtMs(playhead);
+  if (durEl) durEl.textContent = fmtMs(t.durationMs || 0);
 
-  const pct = t.durationMs ? Math.max(0, Math.min(1, playhead / t.durationMs)) : 0;
-  bar.style.width = `${pct * 100}%`;
+  titleEl.textContent = t.title || "Unknown title";
+
+  if (ppBtn) ppBtn.textContent = nowPlaying.isPlaying ? "❚❚" : "▶"; 
+
+  if (subEl) {
+    const sourceLabel =
+      t.source === "spotify" ? "Spotify" :
+      t.source === "apple" ? "Apple Music" :
+      t.source === "itunes" ? "iTunes" : (t.source || "");
+
+    subEl.textContent =
+      `${t.artist || ""}${t.album ? ` • ${t.album}` : ""} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs || 0)} ` +
+      `${nowPlaying.isPlaying ? "• Playing" : "• Paused"}${sourceLabel ? ` • ${sourceLabel}` : ""}`;
+  }
+
+  const dur = Math.max(1, t.durationMs || 1);
+  const pct = Math.max(0, Math.min(1, playhead / dur));
+  barEl.style.width = `${pct * 100}%`;
+  const thumb = el("npThumb");
+  if (thumb) thumb.style.left = `${pct * 100}%`;
 }
+
+
 
 function renderPlaybackSource() {
     const sel = el("playbackSource");
     if (!sel) return;
     sel.value = playbackSource;
   }
+
 
 // ---------- Host polling (iTunes only) ----------
 let lastPos = null;
@@ -640,6 +772,8 @@ function startHostPolling() {
     if (!nowPlaying || nowPlaying.track?.source !== "itunes") {
       return;
     }
+
+    
 
     const np = await window.api.itunes.nowPlaying();
     if (!np) return;
@@ -694,11 +828,15 @@ function startHostPolling() {
   }, 500);
 
   // Smooth progress bar updates on everyone
-  setInterval(renderNowPlaying, 500);
+  setInterval(() => {
+    if (playbackSource === "spotify") return; // ✅ let Spotify polling drive UI
+    renderNowPlaying();
+  }, 500);
 }
 
 // ---------- Button wiring ----------
 function wireUi() {
+  const isHostNow = () => userId && hostUserId && userId === hostUserId;
   // Session buttons
   el("createSession")?.addEventListener("click", () => {
     const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
@@ -727,7 +865,6 @@ function wireUi() {
   });
 
   // Source toggle + reload
-  el("sourceItunes")?.addEventListener("click", () => setSource("itunes"));
   el("sourceSpotify")?.addEventListener("click", () => setSource("spotify"));
   el("sourceApple")?.addEventListener("click", async () => {
     musicSource = "apple";
@@ -741,8 +878,7 @@ function wireUi() {
   // Playlist change
   el("musicPlaylists")?.addEventListener("change", async () => {
     const id = el("musicPlaylists").value;
-    if (musicSource === "itunes") await loadItunesTracks(id);
-    else if (musicSource === "spotify") await loadSpotifyTracks(id);
+    if (musicSource === "spotify") await loadSpotifyTracks(id);
     else await loadAppleTracks(id);
   });
 
@@ -756,77 +892,177 @@ function wireUi() {
   });
 
   // Host controls
-  el("hostPlay")?.addEventListener("click", async () => {
-    const isHost = userId && hostUserId && userId === hostUserId;
-    if (!isHost) return;
+  el("npPlayPause")?.addEventListener("click", async () => {
+    if (!isHostNow()) return;
 
-    // If currently iTunes track, resume iTunes
-    if (nowPlaying?.track?.source === "itunes") {
-      await window.api.itunes.play();
-      if (nowPlaying) {
-        const playheadMs = nowPlaying.playheadMs ?? 0;
+    if (!nowPlaying?.queueId && queue.length) {
+      await hostPlayQueueItem(queue[0]);
+      return;
+    }
+    if (!nowPlaying?.track) return;
+
+    const willPlay = !nowPlaying.isPlaying;
+    const currentPlayhead = computeExpectedPlayhead(nowPlaying);
+
+    // --- ACTUAL playback control ---
+    if (nowPlaying.track?.source === "itunes") {
+      if (willPlay) await window.api.itunes.play();
+      else await window.api.itunes.pause();
+    } else {
+      if (!willPlay) {
+        await playerPause();
+      } else {
+        // First-play fix: ensure the track is loaded on this client before resume
+        const loadKey = `${nowPlaying.queueId}:${playbackSource}`;
+        if (loadKey !== lastLoadedQueueKey) {
+          lastLoadedQueueKey = loadKey;
+          await playTrackOnMySource(nowPlaying.track); // loads + starts
+        } else {
+          await playerPlay(); // resume
+        }
+      }
+    }
+
+    // --- Update shared state (UI + sync) ---
+    nowPlaying = {
+      ...nowPlaying,
+      isPlaying: willPlay,
+      playheadMs: currentPlayhead,
+      startedAt: willPlay ? Date.now() : nowPlaying.startedAt,
+      updatedAt: Date.now(),
+    };
+
+    send("host:state", { sessionId, nowPlaying });
+    renderNowPlaying();
+  });
+
+
+  el("npNext")?.addEventListener("click", async () => {
+    if (!isHostNow()) return;
+    await playerNext();
+  });
+
+  el("npPrev")?.addEventListener("click", async () => {
+    if (!isHostNow()) return;
+    await playerPrev();
+  });
+
+  // Seek bar
+  const prog = el("nowPlaying")?.querySelector(".npProgress");
+  if (prog) {
+    let dragging = false;
+
+    const pctFromEvent = (ev) => {
+      const rect = prog.getBoundingClientRect();
+      const x = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+      return Math.max(0, Math.min(1, (x - rect.left) / rect.width));
+    };
+
+    const previewToPct = (pct) => {
+      const dur = nowPlaying?.track?.durationMs || 0;
+      if (!dur) return;
+      const ms = dur * pct;
+      el("npBar") && (el("npBar").style.width = `${pct * 100}%`);
+      el("npPos") && (el("npPos").textContent = fmtMs(ms));
+      el("npThumb") && (el("npThumb").style.left = `${pct * 100}%`);
+    };
+
+    // const commitToPct = async (pct) => {
+    //   if (!nowPlaying?.track) return;
+
+    //   let durMs = Number(nowPlaying.track.durationMs || 0);
+
+    //   // ✅ Spotify: use the real playing item's duration from the SDK
+    //   if (playbackSource === "spotify") {
+    //     try {
+    //       const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
+    //       const s = await spotifyGetPlaybackState();
+    //       if (s?.duration) durMs = Number(s.duration);
+    //     } catch {}
+    //   }
+
+    //   if (!durMs) return;
+
+    //   // Clamp pct and compute target
+    //   pct = Math.max(0, Math.min(1, pct));
+    //   const targetMs = Math.max(0, Math.min(durMs - 250, Math.floor(durMs * pct))); // avoid seeking past end
+    //   const secs = targetMs / 1000;
+
+    //   await playerSeek(secs);
+
+    //   // Broadcast (host) so everyone syncs
+    //   const playheadMs = Math.floor(secs * 1000);
+    //   nowPlaying = {
+    //     ...nowPlaying,
+    //     playheadMs,
+    //     startedAt: nowPlaying.isPlaying ? (Date.now() - playheadMs) : nowPlaying.startedAt,
+    //     updatedAt: Date.now(),
+    //   };
+
+    //   send("host:state", { sessionId, nowPlaying });
+    //   renderNowPlaying();
+    // };
+
+    prog.addEventListener("mousedown", async (e) => {
+      if (!isHostNow() || !nowPlaying) return;
+
+      isScrubbing = true;
+      scrubWasPlaying = !!nowPlaying.isPlaying;
+
+      // Optional but recommended for smoothness:
+      // pause locally while scrubbing if it was playing
+      if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+        try { await playerPause(); } catch {}
+      }
+
+      dragging = true;
+      previewToPct(pctFromEvent(e));
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      previewToPct(pctFromEvent(e));
+    });
+
+    window.addEventListener("mouseup", async (e) => {
+      if (!dragging) return;
+      dragging = false;
+
+      if (!isHostNow() || !nowPlaying) { isScrubbing = false; return; }
+
+      const pct = pctFromEvent(e);
+      const dur = nowPlaying.track?.durationMs || 0;
+      if (dur) {
+        const secs = (dur * pct) / 1000;
+
+        // seek
+        await playerSeek(secs);
+
+        // resume if it was playing
+        if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+          try { await playerPlay(); } catch {}
+        }
+
+        // broadcast accurate shared state
+        const playheadMs = Math.floor(secs * 1000);
         nowPlaying = {
           ...nowPlaying,
-          isPlaying: true,
-          startedAt: Date.now() - playheadMs,
-          updatedAt: Date.now()
+          playheadMs,
+          startedAt: Date.now(), // ✅ snapshot moment of this base
+          updatedAt: Date.now(),
         };
         send("host:state", { sessionId, nowPlaying });
         renderNowPlaying();
+
+        send("host:state", { sessionId, nowPlaying });
       }
-      return;
-    }
 
-    // If spotify track, "play" just opens it
-    if (nowPlaying?.track?.source === "spotify") {
-      try {
-        const uri = await spotifyFindUriForTrack(nowPlaying.track);
-        if (!uri) throw new Error("Could not find this track on Spotify via search.");
-        await spotifyPlayUriInApp(uri);
-      } catch (e) {
-        el("sessionMeta").textContent =
-          "Spotify in-app playback failed: " + (e?.message || String(e));
-        return;
-      }
-    }
-
-    // If apple track, "play" just opens it
-    if (nowPlaying?.track?.source === "apple") {
-      console.log("[debug] ignoring hostPlay for apple (no openExternal, no resume)");
-      //const ok = await window.api.openExternal(nowPlaying.track.url);
-      // if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
-      return;
-    }
-
-    // If nothing playing, start first queue item
-    if (!nowPlaying?.queueId && queue.length) {
-      await hostPlayQueueItem(queue[0]);
-    }
-  });
-
-  el("hostPause")?.addEventListener("click", async () => {
-    const isHost = userId && hostUserId && userId === hostUserId;
-    if (!isHost) return;
-
-    // Pause only meaningful for iTunes; for spotify we just mark paused
-    if (nowPlaying?.track?.source === "itunes") {
-      await window.api.itunes.pause();
-    }
-
-    if (nowPlaying) {
-      nowPlaying = {
-        ...nowPlaying,
-        isPlaying: false,
-        updatedAt: Date.now()
-      };
-      send("host:state", { sessionId, nowPlaying });
+      isScrubbing = false;
       renderNowPlaying();
-    }
-  });
+    });
 
-  el("hostNext")?.addEventListener("click", async () => {
-    await playNextInSharedQueue();
-  });
+
+  }
 
   window.addEventListener("message", (event) => {
     // Security: only accept messages from our own origin
@@ -846,6 +1082,8 @@ function wireUi() {
 
     console.log("[spotify] token received via postMessage");
   });
+
+
 
   // Spotify connect
   function waitForSpotifyToken({ timeoutMs = 60_000 } = {}) {
@@ -867,6 +1105,17 @@ function wireUi() {
 
   el("connectSpotify")?.addEventListener("click", async () => {
     try {
+      // Web: if we already have a refresh token, refresh silently and skip popup.
+      if (!window?.api?.spotifyConnect) {
+        const { spotifyEnsureAccessToken } = await import("./providers/spotify.js");
+        const rt = localStorage.getItem("spotify:refresh_token") || "";
+        if (rt) {
+          await spotifyEnsureAccessToken();
+          el("sessionMeta").textContent = "Spotify connected!";
+          await reloadMusic();
+          return;
+        }
+      }
       const ipcSpotifyConnect = window?.api?.spotifyConnect;
 
       // Electron path (unchanged)
@@ -912,7 +1161,7 @@ function wireUi() {
     playbackSource = el("playbackSource").value;
     localStorage.setItem(PLAYBACK_SOURCE_KEY, playbackSource);
 
-    // If something is currently playing, re-sync immediately
+    lastLoadedQueueKey = ""; // force a fresh load on next play
     await syncClientToNowPlaying();
   });
 

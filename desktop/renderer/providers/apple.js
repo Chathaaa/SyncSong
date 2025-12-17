@@ -184,3 +184,14 @@ export async function loadAppleTracks(playlistId) {
 
   return { tracks };
 }
+
+export async function appleSeek(seconds) {
+  const mk = await appleEnsureAuthorized();
+  // MusicKit uses seconds
+  mk.seekToTime(Number(seconds) || 0);
+}
+
+export async function applePrev() {
+  const mk = await appleEnsureAuthorized();
+  mk.skipToPreviousItem();
+}
