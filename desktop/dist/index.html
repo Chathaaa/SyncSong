@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="
+      default-src 'self';
+      connect-src 'self' https: wss:
+        https://api.music.apple.com
+        https://api.spotify.com
+        https://accounts.spotify.com;
+      script-src 'self'
+        https://js-cdn.music.apple.com
+        https://sdk.scdn.co;
+      frame-src
+        https://appleid.apple.com
+        https://sdk.scdn.co;
+      img-src 'self' data: https:;
+      style-src 'self' 'unsafe-inline';
+      media-src 'self' blob: data:
+        https://audio-ssl.itunes.apple.com
+        https://audio.itunes.apple.com
+        https://*.mzstatic.com
+        https://*.apple.com;
+    ">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SyncSong</title>
+  <script type="module" crossorigin src="/assets/main-CwjrvWxH.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-B5Qt9EMX.js">
+  <link rel="stylesheet" crossorigin href="/assets/main-Cb2v0N-C.css">
+</head>
+<body>
+  <div class="topbar">
+    <div class="brand">SyncSong</div>
+    <div class="session">
+      <input id="displayName" placeholder="Display name" />
+      <button id="createSession">Create</button>
+      <input id="joinCode" placeholder="Join code" />
+      <button id="joinSession">Join</button>
+      <button id="copySession">Copy invite</button>
+      <div class="sessionMeta" id="sessionMeta"></div>
+      
+    </div>
+  </div>
+
+  <div class="layout">
+    <div class="leftPanel">
+        <div class="panelHeader">
+            <div class="row">
+            <button id="sourceSpotify" class="tab">Spotify</button>
+            <button id="sourceApple" class="tab">Apple Music</button>
+
+            <button class="btnPrimary" id="connectSpotify" style="display:none;">Connect Spotify</button>
+            <button class="btnPrimary" id="connectApple" style="display:none;">Connect Apple</button>
+            </div>
+        </div>
+        <div style="margin-bottom:10px">
+            <select id="musicPlaylists"></select>
+            <input id="searchMine" placeholder="Search tracks..." />
+            <button id="reloadMusic" title="Reload">&#10227;</button>
+        </div>
+
+        <div id="musicTracks"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panelTitle">Shared Playlist</div>
+
+      <div class="nowPlaying" id="nowPlaying">
+        <div class="npTop">
+          <div class="npInfo">
+            <img id="npArt" class="npArt" src="" alt="" />
+            <div class="npText">
+              <div id="npTitle" class="npTitle">Not playing</div>
+              <div id="npSub" class="npSub"></div>
+            </div>
+          </div>
+
+          <div class="npControls">
+            <button id="npPrev" class="npBtn" title="Previous">⏮</button>
+            <button id="npPlayPause" class="npBtn npPrimary" title="Play/Pause">▶</button>
+            <button id="npNext" class="npBtn" title="Next">⏭</button>
+          </div>
+        </div>
+
+        <div class="npBottom">
+          <div id="npTime" class="npTime">
+            <span id="npPos">0:00</span>
+            <span id="npDur">0:00</span>
+          </div>
+
+          <div class="npProgress" id="npProgress">
+            <div class="npBar" id="npBar"></div>
+            <div class="npThumb" id="npThumb"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hostControls">
+        <label style="margin-right:8px;">
+          Listen on:
+          <select id="playbackSource">
+            <option value="apple">Apple Music</option>
+            <option value="spotify">Spotify</option>
+          </select>
+        </label>
+        <!-- <button id="hostPlay">Play</button>
+        <button id="hostPause">Pause</button>
+        <button id="hostNext">Next</button>
+        -->
+        <button id="toggleLoop">Loop: On</button> 
+      </div>
+
+      <div class="list" id="queue"></div>
+    </div>
+  </div>
+
+  <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" data-web-components-async></script>
+  <script src="https://sdk.scdn.co/spotify-player.js"></script>
+</body>
+</html>
