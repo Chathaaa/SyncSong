@@ -3,6 +3,9 @@
 // ensureSpotifyWebPlayer, spotifyPlayUriInApp
 
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
+let spotifyPlaybackPrepared = false;
+let spotifyPreparedDeviceId = "";
+let __lastVolume = 0.8;
 
 function getStoredClientId() {
   return localStorage.getItem("spotify:client_id") || "e87ab2180d5a438ba6f23670e3c12f3d";
@@ -166,6 +169,32 @@ export async function ensureSpotifyWebPlayer() {
   return spotifyPlayer;
 }
 
+export async function spotifyPreparePlaybackDevice() {
+  await ensureSpotifyWebPlayer();
+  await (deviceReadyPromise || waitForDeviceId());
+  if (!spotifyDeviceId) return;
+
+  // Only do this once per device_id
+  if (spotifyPlaybackPrepared && spotifyPreparedDeviceId === spotifyDeviceId) return;
+
+  try {
+    // Prevent "same song restarts" + weird queue behavior
+    await spotifyApi(`/me/player/shuffle?state=false&device_id=${encodeURIComponent(spotifyDeviceId)}`, {
+      method: "PUT",
+    });
+  } catch {}
+
+  try {
+    await spotifyApi(`/me/player/repeat?state=off&device_id=${encodeURIComponent(spotifyDeviceId)}`, {
+      method: "PUT",
+    });
+  } catch {}
+
+  spotifyPlaybackPrepared = true;
+  spotifyPreparedDeviceId = spotifyDeviceId;
+}
+
+
 export async function spotifyPlayUriInApp(spotifyUri) {
   if (!spotifyUri) throw new Error("Missing spotifyUri on track.");
 
@@ -173,6 +202,8 @@ export async function spotifyPlayUriInApp(spotifyUri) {
   await (deviceReadyPromise || waitForDeviceId()); // <- wait for ready
 
   if (!spotifyDeviceId) throw new Error("Spotify device_id not ready yet.");
+
+  await spotifyPreparePlaybackDevice();
 
   await spotifyApi(`/me/player/play?device_id=${encodeURIComponent(spotifyDeviceId)}`, {
     method: "PUT",
@@ -327,4 +358,29 @@ export async function spotifyPrev() {
 export async function spotifyGetPlaybackState() {
   const p = await ensureSpotifyWebPlayer();
   return p.getCurrentState(); // { paused, position, duration, track_window, ... } or null
+}
+
+export async function spotifySetVolume(v) {
+  try {
+    const p = await ensureSpotifyWebPlayer(); // whatever returns your SDK player
+    if (!p?.setVolume) return;
+    __lastVolume = Math.max(0, Math.min(1, Number(v)));
+    await p.setVolume(__lastVolume);
+  } catch {}
+}
+
+export async function spotifyDuckForTransition(ms = 450) {
+  try {
+    const p = await ensureSpotifyWebPlayer();
+    if (!p?.getVolume || !p?.setVolume) return;
+
+    const current = await p.getVolume();
+    // store “real” current volume to restore precisely
+    __lastVolume = (typeof current === "number") ? current : __lastVolume;
+
+    await p.setVolume(0);
+    setTimeout(() => {
+      try { p.setVolume(__lastVolume); } catch {}
+    }, ms);
+  } catch {}
 }
