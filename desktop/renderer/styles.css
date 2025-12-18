@@ -1,91 +1,490 @@
-body { margin:0; font-family: system-ui, Arial; background:#0b1220; color:#e5e7eb; }
-.topbar { display:flex; gap:14px; align-items:center; padding:10px 12px; border-bottom:1px solid #1f2937; background:#0f172a; }
-.brand { font-weight:700; }
-.session { display:flex; gap:8px; align-items:center; flex:1; }
-.session input { height:30px; border-radius:8px; border:1px solid #334155; background:#0b1220; color:#e5e7eb; padding:0 10px; }
-.session button { height:30px; border-radius:8px; border:1px solid #334155; background:#111827; color:#e5e7eb; padding:0 10px; cursor:pointer; }
-.sessionMeta { color:#94a3b8; font-size:12px; margin-left:6px; }
-#copySession { display:none; }
+/* SyncSong – cleaned + consolidated styles
+   - Matches current index.html (npTop/npProgress/npThumb/etc.)
+   - Removes older/unused rules (legacy .npProgress .bar, old theme duplicates)
+   - Keeps: midnight-glass base with Amber + Teal accents
+*/
 
-.layout { display:grid; grid-template-columns: 1fr 1fr; gap:12px; padding:12px; height: calc(100vh - 54px); box-sizing:border-box; }
-.panel { background:#0f172a; border:1px solid #1f2937; border-radius:14px; padding:12px; display:flex; flex-direction:column; min-height:0; }
-.panelTitle { font-weight:700; margin-bottom:10px; }
-.row { display:flex; gap:8px; margin-bottom:10px; }
-select, input { height:34px; border-radius:10px; border:1px solid #334155; background:#0b1220; color:#e5e7eb; padding:0 10px; }
-button { height:34px; border-radius:10px; border:1px solid #334155; background:#111827; color:#e5e7eb; padding:0 10px; cursor:pointer; }
+/* -------------------------
+   Theme tokens (Amber + Teal)
+   ------------------------- */
+:root{
+  /* Base */
+  --bg0: #070A12;
+  --bg1: #0A1020;
 
-.list { overflow:auto; border-top:1px solid #1f2937; padding-top:10px; min-height:0; }
-.item { display:flex; justify-content:space-between; gap:10px; padding:8px; border:1px solid #1f2937; border-radius:10px; margin-bottom:8px; background:#0b1220; }
+  /* Surfaces */
+  --panel: rgba(14, 22, 44, 0.66);
+  --panel2: rgba(10, 16, 32, 0.58);
+  --border: rgba(180, 198, 255, 0.12);
 
-/* --- Fix: prevent long text from shrinking buttons / wrapping button labels --- */
-.item { align-items:center; min-width:0; }                  /* allow flex children to shrink */
-.item .left { flex:1; min-width:0; }                        /* text column takes remaining space */
-.item .actions { display:flex; gap:6px; align-items:center; flex-shrink:0; white-space:nowrap; } /* actions never shrink */
-.item .actions button { white-space:nowrap; }               /* button text stays on one line */
-/* ------------------------------------------------------------------------- */
+  /* Text */
+  --text: rgba(235, 243, 255, 0.92);
+  --muted: rgba(198, 214, 255, 0.72);
+  --muted2: rgba(198, 214, 255, 0.55);
 
-.item .meta { color:#94a3b8; font-size:12px; }
-.item .title { font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.item .meta { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Accents */
+  --accentA: rgba(45, 212, 191, 0.38);  /* teal */
+  --accentB: rgba(251, 191, 36, 0.38);  /* amber */
+  --focus:   rgba(56, 189, 248, 0.38);  /* soft sky focus */
 
-.item .actions button { height:28px; border-radius:8px; font-size:12px; }
-.item .actions button:disabled {
-  opacity: 0.35;
-  cursor: default;
+  /* Shape */
+  --r: 16px;
+  --r2: 12px;
 }
 
-.nowPlaying { border:1px solid #1f2937; border-radius:12px; padding:10px; background:#0b1220; margin-bottom:10px; }
-.npTitle { font-weight:700; }
-.npMeta { color:#94a3b8; font-size:12px; margin-top:4px; }
-.npProgress { height:8px; background:#111827; border:1px solid #1f2937; border-radius:999px; margin-top:8px; overflow:hidden; }
-.npProgress .bar { height:100%; width:0%; background:#22c55e; } /* you can change later */
-.hostControls { display:flex; gap:8px; margin-bottom:10px; }
-
-.tab { opacity: 0.7; }
-.tab.active { opacity: 1; font-weight: 600; }
-.panelHeader .row { display: flex; gap: 8px; margin-bottom: 8px; }
-
-.leftPanel { min-width: 0; }
-.panel { min-width: 0; }
-
-/* 1) Prevent the whole window from scrolling */
-html, body {
+/* -------------------------
+   Base / layout
+   ------------------------- */
+html, body{
   height: 100%;
+  overflow: hidden; /* keep scroll inside panels */
+}
+
+body{
+  margin: 0;
+  font-family: system-ui, Arial;
+  color: var(--text);
+  background:
+    radial-gradient(900px 600px at 12% 0%, rgba(251,191,36,0.10), transparent 55%),
+    radial-gradient(900px 600px at 88% 14%, rgba(45,212,191,0.10), transparent 60%),
+    radial-gradient(1200px 900px at 50% 120%, rgba(56,189,248,0.06), transparent 65%),
+    linear-gradient(180deg, var(--bg0), var(--bg1));
+}
+
+/* -------------------------
+   Top bar
+   ------------------------- */
+.topbar{
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(12, 18, 38, 0.62);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(12px);
+}
+
+.brand{
+  font-weight: 700;
+  letter-spacing: .25px;
+}
+
+.session{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
+.sessionMeta{
+  color: var(--muted2);
+  font-size: 12px;
+  margin-left: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#copySession{ display: none; }
+
+/* -------------------------
+   Grid panels
+   ------------------------- */
+.layout{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px;
+  height: calc(100vh - 54px);
+  box-sizing: border-box;
   overflow: hidden;
 }
 
-/* 2) The two panels should manage overflow internally */
-.layout {
-  overflow: hidden; /* keeps scrollbars inside panels */
-}
-
-/* 3) Make leftPanel behave like a panel with internal scrolling */
-.leftPanel {
+.leftPanel{
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-height: 0;     /* critical for flex children to scroll */
-  overflow: hidden;  /* prevents left panel from expanding */
-}
-
-/* The tracks container becomes the scroll area */
-#musicTracks {
-  overflow: auto;
-  min-height: 0;     /* critical */
-  flex: 1;           /* take remaining height */
-  scrollbar-width: thin;
-  scrollbar-color: #333 transparent;
-}
-
-/* 4) Right panel: ensure the queue list is the scroll area */
-.panel {
   min-height: 0;
-  overflow: hidden;  /* prevents the panel itself from scrolling */
+  overflow: hidden;
 }
 
-.list {
-  flex: 1;           /* take remaining height */
-  overflow: auto;    /* scroll just the list */
-  min-height: 0;     /* critical */
+.panel{
+  min-width: 0;
+  background: linear-gradient(180deg, rgba(14,22,44,0.70), rgba(10,16,32,0.55));
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  box-shadow: 0 12px 36px rgba(0,0,0,.30);
+}
+
+.panelTitle{
+  font-weight: 700;
+  margin-bottom: 10px;
+  letter-spacing: .25px;
+}
+
+.panelHeader .row{
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.row{
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+/* -------------------------
+   Controls: inputs/select/buttons
+   ------------------------- */
+select, input{
+  height: 34px;
+  border-radius: var(--r2);
+  border: 1px solid rgba(180,198,255,0.16);
+  background: rgba(4, 8, 18, 0.45);
+  color: var(--text);
+  padding: 0 10px;
+  transition: border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+
+select:focus, input:focus{
+  outline: none;
+  border-color: rgba(56,189,248,0.55);
+  box-shadow: 0 0 0 3px var(--focus);
+  background: rgba(4, 8, 18, 0.55);
+}
+
+button{
+  height: 34px;
+  border-radius: var(--r2);
+  border: 1px solid rgba(180,198,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+  padding: 0 10px;
+  cursor: pointer;
+  transition: transform .06s ease, background .12s ease, border-color .12s ease;
+}
+
+button:hover{
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(235,243,255,0.18);
+}
+
+button:active{ transform: translateY(1px); }
+button:disabled{ opacity: .42; cursor: not-allowed; }
+
+/* Tabs */
+.tab{
+  opacity: .78;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.tab:hover{
+  opacity: 1;
+  background: rgba(255,255,255,0.05);
+}
+
+.tab.active{
+  opacity: 1;
+  font-weight: 650;
+  border-color: rgba(45,212,191,0.26);
+  background: linear-gradient(90deg, rgba(251,191,36,0.14), rgba(45,212,191,0.12));
+}
+
+/* -------------------------
+   Lists
+   ------------------------- */
+#musicTracks{
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
   scrollbar-width: thin;
-  scrollbar-color: #333 transparent;
+  scrollbar-color: rgba(235,243,255,0.10) transparent;
+}
+
+.list{
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(235,243,255,0.10) transparent;
+}
+
+.item{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid rgba(180,198,255,0.12);
+  border-radius: var(--r2);
+  margin-bottom: 8px;
+  background: rgba(4, 8, 18, 0.40);
+  min-width: 0;
+  transition: transform .08s ease, border-color .12s ease, background .12s ease;
+}
+
+.item:hover{
+  background: rgba(4, 8, 18, 0.55);
+  border-color: rgba(235,243,255,0.16);
+  transform: translateY(-1px);
+}
+
+.item .left{ flex: 1; min-width: 0; }
+
+.item .title{
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+.item .meta{
+  color: var(--muted2);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.item .actions{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.item .actions button{
+  height: 28px;
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.item .actions button:disabled{
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.trackLeft { display:flex; align-items:center; gap:10px; min-width:0; }
+.trackText { min-width:0; }
+.trackArt {
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+/* Host controls row */
+.hostControls{
+  margin: 8px 0;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* -------------------------
+   Now Playing
+   ------------------------- */
+.nowPlaying{
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(180,198,255,0.14);
+  border-radius: var(--r);
+  padding: 12px;
+  background: linear-gradient(180deg, rgba(14,22,44,0.75), rgba(10,16,32,0.60));
+  box-shadow: 0 10px 30px rgba(0,0,0,.25);
+  backdrop-filter: blur(10px);
+}
+
+.nowPlaying::before{
+  content:"";
+  position:absolute;
+  inset:-2px;
+  background:
+    radial-gradient(520px 240px at 18% 12%, rgba(251,191,36,0.18), transparent 60%),
+    radial-gradient(520px 240px at 85% 18%, rgba(45,212,191,0.16), transparent 60%);
+  pointer-events:none;
+  filter: blur(10px);
+  opacity: .9;
+}
+
+.nowPlaying > *{ position: relative; z-index: 1; }
+
+.npTop{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+}
+
+.npInfo{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-width: 0;
+}
+
+.npArt{
+  width: 44px;
+  height: 44px;
+  border-radius: 10px;
+  object-fit: cover;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 8px 18px rgba(0,0,0,.25);
+}
+
+.npText{ min-width: 0; }
+
+.npTitle{
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.npSub{
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.npControls{
+  display:flex;
+  gap:8px;
+  align-items:center;
+}
+
+/* Icon buttons */
+.npBtn{
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 999px;
+  border: 1px solid rgba(180,198,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+
+  transition: background .12s ease, border-color .12s ease, transform .06s ease, opacity .12s ease;
+}
+
+.npBtn:hover{
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(235,243,255,0.18);
+}
+
+.npBtn:active{ transform: translateY(1px); }
+.npBtn:disabled{ opacity: .35; cursor: not-allowed; }
+
+.npPrimary{
+  width: 44px;
+  height: 44px;
+  font-size: 16px;
+  border-color: rgba(45,212,191,0.22);
+  background: linear-gradient(180deg, rgba(45,212,191,0.16), rgba(251,191,36,0.12));
+}
+
+.npBottom{ margin-top: 10px; }
+
+.npTime{
+  display:flex;
+  justify-content:space-between;
+  font-size: 12px;
+  margin-bottom: 6px;
+  letter-spacing: 0.2px;
+  color: rgba(203, 213, 225, 0.85);
+}
+
+.npProgress{
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(235,243,255,0.08);
+  cursor: pointer;
+}
+
+.npBar{
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(251,191,36,0.90), rgba(45,212,191,0.90));
+  transition: width .25s linear;
+}
+
+.npThumb{
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(235,243,255,0.95);
+  transform: translate(-50%, -50%);
+  box-shadow: 0 2px 12px rgba(0,0,0,.40);
+  opacity: 0;
+  transition: opacity .12s ease, transform .12s ease;
+}
+
+.nowPlaying:hover .npThumb{ opacity: 1; }
+.npProgress:active .npThumb{
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1.18);
+}
+
+/* Optional scrubbing states (toggled by JS) */
+body.scrubbing{ user-select: none; }
+#npProgress.scrubbing{ cursor: grabbing; }
+#npProgress.scrubbing .npBar{ transition: none; }
+
+/* -------------------------
+   Scrollbars (Chromium)
+   ------------------------- */
+#musicTracks::-webkit-scrollbar,
+.list::-webkit-scrollbar,
+select#musicPlaylists::-webkit-scrollbar{
+  width: 10px;
+}
+
+#musicTracks::-webkit-scrollbar-thumb,
+.list::-webkit-scrollbar-thumb,
+select#musicPlaylists::-webkit-scrollbar-thumb{
+  background: rgba(235,243,255,0.10);
+  border-radius: 999px;
+  border: 2px solid rgba(0,0,0,0);
+  background-clip: padding-box;
+}
+
+#musicTracks::-webkit-scrollbar-thumb:hover,
+.list::-webkit-scrollbar-thumb:hover,
+select#musicPlaylists::-webkit-scrollbar-thumb:hover{
+  background: rgba(235,243,255,0.16);
+  background-clip: padding-box;
+}
+
+/* Playlist select: subtle top highlight */
+select#musicPlaylists{
+  background-image: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0));
 }

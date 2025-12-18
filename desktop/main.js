@@ -3,7 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const http = require("http");
 const crypto = require("crypto");
-const itunes = require("./providers/itunes");
+const itunes = require("./providers-local/itunes");
 const { shell } = require("electron");
 
 const SPOTIFY_CLIENT_ID = "e87ab2180d5a438ba6f23670e3c12f3d";

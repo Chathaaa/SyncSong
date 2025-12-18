@@ -45,12 +45,11 @@
     <div class="leftPanel">
         <div class="panelHeader">
             <div class="row">
-            <button id="sourceItunes" class="tab active">iTunes</button>
             <button id="sourceSpotify" class="tab">Spotify</button>
             <button id="sourceApple" class="tab">Apple Music</button>
 
-            <button id="connectSpotify" style="display:none;">Connect Spotify</button>
-            <button id="connectApple" style="display:none;">Connect Apple</button>
+            <button class="btnPrimary" id="connectSpotify" style="display:none;">Connect Spotify</button>
+            <button class="btnPrimary" id="connectApple" style="display:none;">Connect Apple</button>
             </div>
         </div>
         <div style="margin-bottom:10px">
@@ -66,9 +65,33 @@
       <div class="panelTitle">Shared Playlist</div>
 
       <div class="nowPlaying" id="nowPlaying">
-        <div class="npTitle">Not playing</div>
-        <div class="npMeta"></div>
-        <div class="npProgress"><div class="bar" id="npBar"></div></div>
+        <div class="npTop">
+          <div class="npInfo">
+            <img id="npArt" class="npArt" src="" alt="" />
+            <div class="npText">
+              <div id="npTitle" class="npTitle">Not playing</div>
+              <div id="npSub" class="npSub"></div>
+            </div>
+          </div>
+
+          <div class="npControls">
+            <button id="npPrev" class="npBtn" title="Previous">⏮</button>
+            <button id="npPlayPause" class="npBtn npPrimary" title="Play/Pause">▶</button>
+            <button id="npNext" class="npBtn" title="Next">⏭</button>
+          </div>
+        </div>
+
+        <div class="npBottom">
+          <div id="npTime" class="npTime">
+            <span id="npPos">0:00</span>
+            <span id="npDur">0:00</span>
+          </div>
+
+          <div class="npProgress" id="npProgress">
+            <div class="npBar" id="npBar"></div>
+            <div class="npThumb" id="npThumb"></div>
+          </div>
+        </div>
       </div>
 
       <div class="hostControls">
@@ -79,10 +102,11 @@
             <option value="spotify">Spotify</option>
           </select>
         </label>
-        <button id="hostPlay">Play</button>
+        <!-- <button id="hostPlay">Play</button>
         <button id="hostPause">Pause</button>
         <button id="hostNext">Next</button>
-        <button id="toggleLoop">Loop: On</button>
+        -->
+        <button id="toggleLoop">Loop: On</button> 
       </div>
 
       <div class="list" id="queue"></div>

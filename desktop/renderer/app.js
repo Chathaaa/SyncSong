@@ -3,6 +3,17 @@ const WS_URL = "wss://syncsong-2lxp.onrender.com";
 // Import renderer-side providers (keeps app.js slim)
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
 import { APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken, ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized, appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext } from "./providers/apple.js";
+import { makeControls } from "./controls.js";
+
+const controls = makeControls({
+  getPlaybackSource: () => playbackSource,
+  getNowPlaying: () => nowPlaying,
+  onNextShared: () => playNextInSharedQueue(),
+  onPrevShared: () => playPrevInSharedQueue(),
+});
+
+const { playerPlay, playerPause, playerSeek, playerNext, playerPrev } = controls;
+
 
 let ws;
 let userId = null;
@@ -17,8 +28,7 @@ let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "
 let playlists = [];      // [{id,name}]
 let tracks = [];         // unified track objects
 let tracksFiltered = [];
-
-let currentItunesPlaylistIndex = null;
+let lastLoadedQueueKey = ""; // queueId:playbackSource
 
 // session + UX helpers
 let pendingAddTrack = null;
@@ -27,6 +37,17 @@ let pendingCreate = false;
 // playback behavior
 let loopQueue = true; // default
 let autoAdvanceLock = false;
+let lastApplePosMs = 0;
+let lastSpotifyPosMs = 0;
+let lastAutoAdvanceQueueId = "";
+let lastAutoAdvanceSource = "";
+let localActiveQueueId = "";
+let isScrubbing = false;
+let scrubWasPlaying = false;
+let spotifyPollIgnoreUntil = 0;
+let lastSpotifyUriLoaded = "";
+let hostIntentIsPlaying = true; // host's desired play state (source of truth for transitions)
+
 
 // ---------- Unified music panel ----------
 const LAST_SOURCE_KEY = "syncsong:lastSource";
@@ -46,8 +67,9 @@ const isWeb = typeof window.api === "undefined";
 const el = (id) => document.getElementById(id);
 
 function send(type, payload) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify({ type, payload }));
+  return true;
 }
 
 function escapeHtml(s) {
@@ -67,6 +89,12 @@ function fmtMs(ms) {
   const r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
 }
+
+function setScrubbing(on) {
+  document.body.classList.toggle("scrubbing", on);
+  el("npProgress")?.classList.toggle("scrubbing", on);
+}
+
 
 // ---------- Clipboard / Share ----------
 async function copyTextToClipboard(text) {
@@ -134,6 +162,7 @@ function connectWS() {
 
   ws.onopen = () => {
     el("sessionMeta").textContent = "Connected";
+    pendingCreate = false; // allow session:create to be attempted again
   };
 
   ws.onmessage = (e) => {
@@ -275,82 +304,31 @@ function renderMusicTracks() {
     const row = document.createElement("div");
     row.className = "item";
 
-    const extraBtn =
-      t.source === "spotify"
-        ? `<button data-open="${t.id}">Open</button>`
-        : ``;
-
     row.innerHTML = `
-        <div class="left">
-            <div class="title">${escapeHtml(t.title)}</div>
-            <div class="meta">${escapeHtml(t.artist)} • ${escapeHtml(t.album || "")} • ${fmtMs(t.durationMs)}</div>
+      <div class="left trackLeft">
+        <img class="trackArt" src="${escapeHtml(t.artworkUrl || "")}" alt="" loading="lazy" />
+        <div class="trackText">
+          <div class="title">${escapeHtml(t.title)}</div>
+          <div class="meta">${escapeHtml(t.artist)} • ${escapeHtml(t.album || "")} • ${fmtMs(t.durationMs)}</div>
         </div>
-        <div class="actions">
-            <button data-add="${t.id}">+ Add</button>
-            <button data-open="${t.id}" ${(t.source === "spotify" || t.source === "apple") ? "" : "disabled"}>Open</button>
-        </div>
-        `;
+      </div>
+      <div class="actions">
+        <button data-add="${t.id}">+ Add</button>
+      </div>
+    `;
+
+    const img = row.querySelector(".trackArt");
+    if (img) {
+      img.onerror = () => { img.style.display = "none"; };
+      if (!t.artworkUrl) img.style.display = "none";
+    }
 
     row.querySelector("[data-add]").addEventListener("click", () => addToQueue(t));
-
-    const canOpen = (t.source === "spotify" && t.spotifyUri) || (t.source === "apple" && t.url);
-
-    row.querySelector("[data-open]").toggleAttribute("disabled", !canOpen);
-
-    row.querySelector("[data-open]").addEventListener("click", async () => {
-      if (t.source === "spotify") {
-        const ok = await window.api.openExternal(t.spotifyUri);
-        if (!ok && t.spotifyUrl) await window.api.openExternal(t.spotifyUrl);
-      } else if (t.source === "apple") {
-        //await window.api.openExternal(t.url);
-      }
-    });
 
     box.appendChild(row);
   });
 }
 
-async function loadItunesPlaylistsAndTracks() {
-  
-  if (isWeb) {
-    throw new Error("iTunes is only available in the desktop app.");
-  }
-
-  const ok = await window.api.itunes.available();
-  if (!ok) throw new Error("iTunes not found. Please install iTunes.");
-
-  const pls = await window.api.itunes.listPlaylists();
-  playlists = pls.map(p => ({ id: String(p.index), name: p.name }));
-  renderMusicPlaylists();
-
-  const selId = el("musicPlaylists").value;
-  await loadItunesTracks(selId);
-}
-
-async function loadItunesTracks(playlistIndex) {
-  localStorage.setItem(LAST_ITUNES_PLAYLIST_KEY, String(playlistIndex));
-
-  const raw = await window.api.itunes.listTracks(Number(playlistIndex));
-  currentItunesPlaylistIndex = Number(playlistIndex);
-
-  tracks = raw.map((t) => ({
-    id: cryptoRandomId(),
-    source: "itunes",
-    title: t.title,
-    artist: t.artist,
-    album: t.album,
-    durationMs: t.durationMs,
-
-    itunesPlaylistIndex: currentItunesPlaylistIndex,
-    itunesPlaylistTrackIndex: Number(t.trackIndex ?? 0),
-
-    // optional ids (may be blank/0, but kept)
-    itunesTrackId: Number(t.trackId ?? 0),
-    itunesPersistentId: String(t.persistentId ?? ""),
-  }));
-
-  applySearch();
-}
 
 // Spotify playlist/track helpers moved to providers/spotify.js
 async function loadSpotifyPlaylistsAndTracks() {
@@ -429,12 +407,26 @@ function ensureSessionForAdd(track) {
 
   pendingAddTrack = track;
 
+  // If we're not connected yet, don't lock pendingCreate forever
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    el("sessionMeta").textContent = "Connecting… try again in a moment.";
+    return false;
+  }
+
   if (!pendingCreate) {
     pendingCreate = true;
     const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
-    send("session:create", { displayName });
-    el("sessionMeta").textContent = "Creating session...";
+
+    const ok = send("session:create", { displayName });
+    if (!ok) {
+      pendingCreate = false; // allow retries
+      el("sessionMeta").textContent = "Couldn’t create session (not connected).";
+      return false;
+    }
+
+    el("sessionMeta").textContent = "Creating session…";
   }
+
   return false;
 }
 
@@ -476,27 +468,38 @@ function renderQueue() {
   });
 }
 
-async function hostPlayQueueItem(qItem) {
+async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
   const isHost = userId && hostUserId && userId === hostUserId;
   if (!isHost) return;
 
   autoAdvanceLock = false;
 
-  // Broadcast the shared state (everyone plays it on their chosen platform)
+  const nextIsPlaying = (typeof isPlaying === "boolean") ? isPlaying : true;
+
+  hostIntentIsPlaying = nextIsPlaying;
+
   nowPlaying = {
     queueId: qItem.queueId,
     track: qItem.track,
-    isPlaying: true,
+    isPlaying: nextIsPlaying,
     playheadMs: 0,
-    startedAt: Date.now(),
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
   };
+
+  localActiveQueueId = nowPlaying.queueId;
 
   send("host:state", { sessionId, nowPlaying });
   renderNowPlaying();
 
-  // Optional: let the host ALSO listen on their chosen source
   await syncClientToNowPlaying();
+
+  // ✅ NEW: after the new track is loaded, reassert the intended play state
+  if (nextIsPlaying) {
+    try {
+      if (playbackSource === "apple") {await applePlay()};
+      if (playbackSource === "spotify") await playerPlay();
+    } catch {}
+  }
 }
 
 async function playNextInSharedQueue() {
@@ -504,65 +507,88 @@ async function playNextInSharedQueue() {
   if (!isHost) return;
   if (!queue.length) return;
 
+  const wasPlaying = hostIntentIsPlaying;
+
+  // // ✅ 1) Duck first (prevents audible blip)
+  // try {
+  //   if (playbackSource === "spotify") {
+  //     const { spotifyDuckForTransition } = await import("./providers/spotify.js");
+  //     await spotifyDuckForTransition(500);
+  //   }
+  //   // if (playbackSource === "apple") {
+  //   //   const { appleDuckForTransition } = await import("./providers/apple.js");
+  //   //   await appleDuckForTransition(500);
+  //   // }
+  // } catch {}
+
+  // ✅ kill the “old song blip” BEFORE we change shared state
+  try {
+    if (playbackSource === "apple") await applePause();
+    if (playbackSource === "spotify") await playerPause();
+  } catch {}
+
+
   if (!nowPlaying?.queueId) {
-    await hostPlayQueueItem(queue[0]);
+    await hostPlayQueueItem(queue[0], { isPlaying: wasPlaying });
     return;
   }
 
   const idx = queue.findIndex(q => q.queueId === nowPlaying.queueId);
   if (idx < 0) {
-    await hostPlayQueueItem(queue[0]);
+    await hostPlayQueueItem(queue[0], { isPlaying: wasPlaying });
     return;
   }
 
   const nextIdx = idx + 1;
 
   if (nextIdx >= queue.length) {
-    if (!loopQueue) {
-      // stop at end
-      return;
-    }
+    if (!loopQueue) return;
+    await hostPlayQueueItem(queue[0], { isPlaying: wasPlaying });
+    return;
+  }
+
+  await hostPlayQueueItem(queue[nextIdx], { isPlaying: wasPlaying });
+}
+
+
+async function playPrevInSharedQueue() {
+  const isHost = userId && hostUserId && userId === hostUserId;
+  if (!isHost) return;
+  if (!queue.length) return;
+
+  try {
+    if (playbackSource === "spotify") await playerPause();
+    if (playbackSource === "apple") await applePause();
+  } catch {}
+
+  if (!nowPlaying?.queueId) {
     await hostPlayQueueItem(queue[0]);
     return;
   }
 
-  await hostPlayQueueItem(queue[nextIdx]);
+  const idx = queue.findIndex(q => q.queueId === nowPlaying.queueId);
+  const prevIdx = idx <= 0 ? (loopQueue ? queue.length - 1 : 0) : idx - 1;
+  await hostPlayQueueItem(queue[prevIdx]);
 }
-
-async function syncAppleClientToNowPlaying() {
-  if (!nowPlaying?.track || nowPlaying.track.source !== "apple") return;
-
-  // Only apply if this is a new update
-  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${nowPlaying.isPlaying ? "1" : "0"}`;
-  if (key === lastAppliedNowPlayingKey) return;
-  lastAppliedNowPlayingKey = key;
-
-  try {
-    if (nowPlaying.isPlaying) {
-      // Play the track inside the app (MusicKit)
-      await applePlayTrack(nowPlaying.track);
-    } else {
-      await applePause();
-    }
-  } catch (e) {
-    el("sessionMeta").textContent = `Apple sync error: ${e?.message || String(e)}`;
-  }
-}
-
-let lastClientPlayedKey = "";
 
 async function playTrackOnMySource(track) {
   if (!track) return;
 
+
   if (playbackSource === "apple") {
     await applePlayTrack(track);
+    startAppleStateSync();
     return;
   }
 
   if (playbackSource === "spotify") {
+    spotifyPollIgnoreUntil = Date.now() + 1200; // 1.2s transition window
     const uri = await spotifyFindUriForTrack(track);
     if (!uri) throw new Error("Could not find this track on Spotify via search.");
+
+    lastSpotifyUriLoaded = uri; // ✅ remember what we intended to play
     await spotifyPlayUriInApp(uri);
+    startSpotifyStateSync();
     return;
   }
 }
@@ -570,57 +596,209 @@ async function playTrackOnMySource(track) {
 async function syncClientToNowPlaying() {
   if (!nowPlaying?.track) return;
 
-  // If host marks paused, we can pause Apple; Spotify can’t be controlled here (only opened)
+  const loadKey = `${nowPlaying.queueId}:${playbackSource}`;
+
   if (!nowPlaying.isPlaying) {
-    if (playbackSource === "apple") {
-      try { await applePause(); } catch {}
-    }
+    try {
+      if (playbackSource === "apple") await applePause();
+      else await playerPause();
+    } catch {}
     return;
   }
 
-  // Prevent replay loops on repeated broadcasts
-  const key = `${nowPlaying.queueId}:${nowPlaying.updatedAt || 0}:${playbackSource}`;
-  if (key === lastClientPlayedKey) return;
-  lastClientPlayedKey = key;
+  // If same track already loaded, just resume (don't restart)
+  if (loadKey === lastLoadedQueueKey) {
+    try { await playerPlay(); } catch {}
+    return;
+  }
+
+  // New track: load/open it once
+  lastLoadedQueueKey = loadKey;
+  localActiveQueueId = nowPlaying.queueId; // ✅ mark what we expect locally
 
   try {
+    await stopAllLocalPlayback();
     await playTrackOnMySource(nowPlaying.track);
   } catch (e) {
-    el("sessionMeta").textContent = `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
+    el("sessionMeta").textContent =
+      `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
   }
+}
+
+async function stopAllLocalPlayback() {
+  // stop Spotify polling if we leave spotify
+  stopSpotifyStateSync?.();
+  stopAppleStateSync?.();
+
+  // Pause both engines best-effort
+  try { await playerPause(); } catch {}
+  try { await applePause(); } catch {}
+
+  // If you added mk.stop() inside applePlayTrack you can optionally expose an appleStop() too
+  // try { await appleStop(); } catch {}
+}
+
+
+let spotifyStateTimer = null;
+
+async function startSpotifyStateSync() {
+  // If we're in the ignore window, schedule a start right after it ends.
+  const waitMs = Math.max(0, spotifyPollIgnoreUntil - Date.now());
+  if (waitMs > 0) {
+    setTimeout(() => startSpotifyStateSync(), waitMs + 50);
+    return;
+  }
+
+  stopSpotifyStateSync();
+
+  spotifyStateTimer = setInterval(async () => {
+    try {
+      const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
+      const s = await spotifyGetPlaybackState();
+      const currentUri = s?.track_window?.current_track?.uri || "";
+      if (lastSpotifyUriLoaded && currentUri && currentUri !== lastSpotifyUriLoaded) {
+        // Spotify drifted (autoplay/other device/etc). Ignore this state so we don't
+        // advance the shared queue based on the wrong track.
+        return;
+      }
+      if (!s) return;
+
+      if (playbackSource !== "spotify") return;
+      if (!nowPlaying?.track) return;
+      if (isScrubbing) return;
+
+      // inside the interval tick, before mutating nowPlaying:
+      if (!nowPlaying?.queueId) return;
+      if (nowPlaying.queueId !== localActiveQueueId) return; // ✅ ignore stale tick
+
+      const dur = Number(s.duration || 0);
+      const pos = Math.max(0, Math.min(Number(s.position || 0), dur || Infinity));
+      const paused = !!s.paused;
+
+      nowPlaying = {
+        ...nowPlaying,
+        isPlaying: !paused,
+        playheadMs: pos,
+      };
+
+      renderNowPlaying();
+    } catch {}
+  }, 500);
+}
+
+
+function stopSpotifyStateSync() {
+  if (spotifyStateTimer) clearInterval(spotifyStateTimer);
+  spotifyStateTimer = null;
+}
+
+let appleStateTimer = null;
+
+function stopAppleStateSync() {
+  if (appleStateTimer) clearInterval(appleStateTimer);
+  appleStateTimer = null;
+}
+
+async function startAppleStateSync() {
+  stopAppleStateSync();
+
+  appleStateTimer = setInterval(async () => {
+    try {
+      if (playbackSource !== "apple") return;
+      if (!nowPlaying?.track) return;
+      if (isScrubbing) return;
+      if (nowPlaying.queueId !== localActiveQueueId) return; // ✅ prevents mismatched UI
+
+      const { appleGetPlaybackState } = await import("./providers/apple.js");
+      const a = await appleGetPlaybackState();
+      //console.log("[apple poll]", a);
+      if (!a) return;
+
+      // Keep UI driven by the *real* player clock
+      nowPlaying = {
+        ...nowPlaying,
+        //isPlaying: !!a.isPlaying,
+        playheadMs: Number(a.positionMs),
+        // NOTE: no startedAt updates here (you wanted to remove manual timestamping)
+      };
+
+      renderNowPlaying();
+    } catch {}
+  }, 500);
 }
 
 
 // ---------- Now playing UI ----------
+
 function computeExpectedPlayhead(np) {
-  if (!np) return 0;
-  if (!np.isPlaying) return np.playheadMs || 0;
-  const startedAt = np.startedAt || Date.now();
-  return Math.max(0, Date.now() - startedAt);
+  // No manual clock: UI uses last provider-reported position
+  return Math.max(0, Number(np?.playheadMs ?? 0));
 }
 
 function renderNowPlaying() {
   const box = el("nowPlaying");
-  const bar = el("npBar");
-  if (!box || !bar) return;
+  if (!box) return;
+  if (isScrubbing) return; // don't fight the user
 
-  if (!nowPlaying) {
-    box.querySelector(".npTitle").textContent = "Not playing";
-    box.querySelector(".npMeta").textContent = "";
-    bar.style.width = "0%";
+  // Prefer IDs (matches your current index.html)
+  const titleEl = el("npTitle") || box.querySelector(".npTitle");
+  const subEl   = el("npSub")   || box.querySelector(".npSub") || box.querySelector(".npMeta");
+  const barEl   = el("npBar")   || box.querySelector("#npBar") || box.querySelector(".bar");
+  const ppBtn = el("npPlayPause");
+  const posEl = el("npPos");
+  const durEl = el("npDur");
+  const artEl = el("npArt");
+
+  if (!titleEl || !barEl) return; // don't crash the app if markup changes
+
+
+  if (!nowPlaying?.track) {
+    titleEl.textContent = "Not playing";
+    if (subEl) subEl.textContent = "";
+    if (artEl) {
+      artEl.src = "";
+      artEl.style.display = "none";
+    }
+    barEl.style.width = "0%";
     return;
   }
 
   const t = nowPlaying.track;
-  const playhead = computeExpectedPlayhead(nowPlaying);
+  const dur = Math.max(0, Number(t.durationMs || 0));
+  let playhead = computeExpectedPlayhead(nowPlaying);
 
-  box.querySelector(".npTitle").textContent = `${t.title}`;
-  box.querySelector(".npMeta").textContent =
-    `${t.artist} • ${fmtMs(playhead)} / ${fmtMs(t.durationMs)} ${nowPlaying.isPlaying ? "• Playing" : "• Paused"} • ${t.source === "spotify" ? "Spotify" : t.source === "apple" ? "Apple Music" : "iTunes"}`;
+  // ✅ clamp so UI can’t run past the end
+  if (dur > 0) playhead = Math.max(0, Math.min(playhead, dur));
 
-  const pct = t.durationMs ? Math.max(0, Math.min(1, playhead / t.durationMs)) : 0;
-  bar.style.width = `${pct * 100}%`;
+  if (posEl) posEl.textContent = fmtMs(playhead);
+  if (durEl) durEl.textContent = fmtMs(t.durationMs || 0);
+  if (artEl) {
+    artEl.src = t.artworkUrl || "";
+    artEl.style.display = t.artworkUrl ? "block" : "none";
+  }
+
+  titleEl.textContent = t.title || "Unknown title";
+
+  if (ppBtn) ppBtn.textContent = nowPlaying.isPlaying ? "❚❚" : "▶"; 
+
+  if (subEl) {
+    const sourceLabel =
+      t.source === "spotify" ? "Spotify" :
+      t.source === "apple" ? "Apple Music" :
+      t.source === "itunes" ? "iTunes" : (t.source || "");
+
+      // ${fmtMs(playhead)} / ${fmtMs(t.durationMs || 0)}
+    subEl.textContent =
+      `${t.artist || ""}${t.album ? ` • ${t.album}` : ""}` +
+      `${sourceLabel ? ` • ${sourceLabel}` : ""}`;
+  }
+
+  const pct = Math.max(0, Math.min(1, playhead / dur));
+  barEl.style.width = `${pct * 100}%`;
+  const thumb = el("npThumb");
+  if (thumb) thumb.style.left = `${pct * 100}%`;
 }
+
 
 function renderPlaybackSource() {
     const sel = el("playbackSource");
@@ -628,77 +806,147 @@ function renderPlaybackSource() {
     sel.value = playbackSource;
   }
 
-// ---------- Host polling (iTunes only) ----------
-let lastPos = null;
 
-function startHostPolling() {
-  setInterval(async () => {
+let hostAutoAdvanceTimer = null;
+
+function startHostAutoAdvance() {
+  if (hostAutoAdvanceTimer) clearInterval(hostAutoAdvanceTimer);
+
+  hostAutoAdvanceTimer = setInterval(async () => {
     const isHost = userId && hostUserId && userId === hostUserId;
     if (!isHost || !sessionId) return;
 
-    // Only poll/refine when current is iTunes track
-    if (!nowPlaying || nowPlaying.track?.source !== "itunes") {
-      return;
+    if (!nowPlaying?.track) return;     // ✅ null-safe and allows end-of-track handling
+    if (!queue?.length) return;
+    if (autoAdvanceLock) return;
+
+
+
+    // ✅ New shared item loaded → reset Apple end-detection state
+    if (nowPlaying.queueId !== lastAutoAdvanceQueueId || playbackSource !== lastAutoAdvanceSource) {
+      lastAutoAdvanceQueueId = nowPlaying.queueId;
+      lastAutoAdvanceSource = playbackSource;
+      lastApplePosMs = 0;
+      lastSpotifyPosMs = 0;
+      // ✅ new track is active → allow the next end-of-track advance
+      autoAdvanceLock = false;
     }
 
-    const np = await window.api.itunes.nowPlaying();
-    if (!np) return;
+    try {
+      let posMs = null;
+      let durMs = Number(nowPlaying.track.durationMs);
+      const END_BUFFER_MS = playbackSource === "apple" ? 500 : 500;
 
-    const pos = Number(np.playerPositionMs ?? 0);
-    const state = Number(np.playerState ?? 0);
+      let providerIsPlaying = true; // default
+      let ended = false;
 
-    const positionMoved = lastPos !== null && Math.abs(pos - lastPos) > 250;
-    const isPlaying = (state === 1) || positionMoved;
-    lastPos = pos;
+      if (playbackSource === "spotify") {
+        const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
+        const s = await spotifyGetPlaybackState();
 
-    // Keep the queueId + track from our queue item (authoritative)
-    const currentQueueItem = queue.find(q => q.queueId === nowPlaying.queueId) || null;
-    const track = currentQueueItem?.track || nowPlaying.track;
+        // If SDK returns null sometimes, we can still detect "ended" via lastSpotifyPosMs
+        if (!s) {
+          return;
+          // durMs stays from metadata fallback
+        } else {
+          const currentUri = s?.track_window?.current_track?.uri || "";
+          if (lastSpotifyUriLoaded && currentUri && currentUri !== lastSpotifyUriLoaded) return;
 
-    const startedAt = isPlaying
-      ? (Date.now() - pos)
-      : (nowPlaying.startedAt ?? (Date.now() - pos));
+          posMs = Number(s.position);
+          durMs = Number(s.duration);
+          providerIsPlaying = !s.paused;
+          
+          if (posMs > lastSpotifyPosMs) lastSpotifyPosMs = posMs; // ✅ track progress
+          // Snap-to-0 ended signal (paused + pos reset after being near end)
+    
+          if (!providerIsPlaying &&
+              posMs < 1000 &&
+              durMs > 10_000 &&
+              lastSpotifyPosMs >= durMs - END_BUFFER_MS) {
+            ended = true;
+          }
+        }
+      }
 
-    // Auto-advance: trigger BEFORE iTunes advances its own playlist
-    const dur = Number(track.durationMs ?? 0);
-    const shouldAutoAdvance =
-      isPlaying &&
-      dur > 0 &&
-      pos >= dur - 1200 && // ~1.2s before end
-      !autoAdvanceLock;
+      if (playbackSource === "apple") {
+        const { appleGetPlaybackState } = await import("./providers/apple.js");
+        const a = await appleGetPlaybackState();
+        if (!a) return;
 
-    if (shouldAutoAdvance) {
+        const aPos = Number(a.positionMs);
+        const aDur = Number(a.durationMs);
+
+        // Use provider duration if available, else fall back to track metadata duration (NOT a clock)
+        if (aDur > 1000) durMs = aDur;
+
+        posMs = aPos;
+        providerIsPlaying = !!a.isPlaying;
+
+        // Track last good position so we can detect the "snap to 0 when ended"
+        if (posMs > lastApplePosMs) lastApplePosMs = posMs;
+        console.log(posMs)
+        providerIsPlaying = !!a.isPlaying;
+
+        const nearEnd = durMs > 10_000 && posMs >= durMs - END_BUFFER_MS;
+
+        if (!providerIsPlaying && nearEnd) ended = true;
+
+        if (!providerIsPlaying &&
+            posMs < 1000 &&
+            durMs > 10_000 &&
+            lastApplePosMs >= durMs - END_BUFFER_MS) {
+          ended = true;
+        }
+      }
+
+      // If user paused mid-track, do nothing
+      if (!ended) return;
+
       autoAdvanceLock = true;
+      await advanceNextLikeButton();
+      lastApplePosMs = 0;
+      lastSpotifyPosMs = 0;
 
-      // stop iTunes from continuing its own playlist
-      await window.api.itunes.pause();
-
-      // advance our queue (respects loopQueue)
-      await playNextInSharedQueue();
-
-      setTimeout(() => { autoAdvanceLock = false; }, 1500);
-      return; // stop this poll tick
+    } catch {
+      // ignore transient polling failures
     }
+  }, 500);
+}
 
-    nowPlaying = {
-      queueId: nowPlaying.queueId,
-      track,
-      isPlaying,
-      playheadMs: pos,
-      startedAt,
-      updatedAt: Date.now()
-    };
-
-    send("host:state", { sessionId, nowPlaying });
+function startUiTick() {
+  setInterval(() => {
+    if (isScrubbing) return;
+    if (playbackSource === "spotify") return;
+   if (playbackSource === "apple") return;
     renderNowPlaying();
   }, 500);
-
-  // Smooth progress bar updates on everyone
-  setInterval(renderNowPlaying, 500);
 }
+
+async function advanceNextLikeButton() {
+  const isHost = userId && hostUserId && userId === hostUserId;
+  if (!isHost) return;
+
+  // IMPORTANT: capture intent before we pause for the transition
+  const wasPlaying = hostIntentIsPlaying;
+
+  // optional: pause old track to reduce blip
+  try {
+    if (playbackSource === "apple") await applePause();
+    else if (playbackSource === "spotify") await playerPause();
+  } catch {}
+
+  // advance shared queue; hostPlayQueueItem receives isPlaying via playNextInSharedQueue
+  hostIntentIsPlaying = wasPlaying;
+  await playerNext();
+
+  // DO NOT call applePlay()/playerPlay() here.
+  // hostPlayQueueItem() will do it after the new track is loaded.
+}
+
 
 // ---------- Button wiring ----------
 function wireUi() {
+  const isHostNow = () => userId && hostUserId && userId === hostUserId;
   // Session buttons
   el("createSession")?.addEventListener("click", () => {
     const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
@@ -727,7 +975,6 @@ function wireUi() {
   });
 
   // Source toggle + reload
-  el("sourceItunes")?.addEventListener("click", () => setSource("itunes"));
   el("sourceSpotify")?.addEventListener("click", () => setSource("spotify"));
   el("sourceApple")?.addEventListener("click", async () => {
     musicSource = "apple";
@@ -741,8 +988,7 @@ function wireUi() {
   // Playlist change
   el("musicPlaylists")?.addEventListener("change", async () => {
     const id = el("musicPlaylists").value;
-    if (musicSource === "itunes") await loadItunesTracks(id);
-    else if (musicSource === "spotify") await loadSpotifyTracks(id);
+    if (musicSource === "spotify") await loadSpotifyTracks(id);
     else await loadAppleTracks(id);
   });
 
@@ -756,77 +1002,187 @@ function wireUi() {
   });
 
   // Host controls
-  el("hostPlay")?.addEventListener("click", async () => {
-    const isHost = userId && hostUserId && userId === hostUserId;
-    if (!isHost) return;
+  el("npPlayPause")?.addEventListener("click", async () => {
+    if (!isHostNow()) return;
 
-    // If currently iTunes track, resume iTunes
-    if (nowPlaying?.track?.source === "itunes") {
-      await window.api.itunes.play();
-      if (nowPlaying) {
-        const playheadMs = nowPlaying.playheadMs ?? 0;
-        nowPlaying = {
-          ...nowPlaying,
-          isPlaying: true,
-          startedAt: Date.now() - playheadMs,
-          updatedAt: Date.now()
-        };
-        send("host:state", { sessionId, nowPlaying });
-        renderNowPlaying();
-      }
-      return;
-    }
 
-    // If spotify track, "play" just opens it
-    if (nowPlaying?.track?.source === "spotify") {
-      try {
-        const uri = await spotifyFindUriForTrack(nowPlaying.track);
-        if (!uri) throw new Error("Could not find this track on Spotify via search.");
-        await spotifyPlayUriInApp(uri);
-      } catch (e) {
-        el("sessionMeta").textContent =
-          "Spotify in-app playback failed: " + (e?.message || String(e));
-        return;
-      }
-    }
-
-    // If apple track, "play" just opens it
-    if (nowPlaying?.track?.source === "apple") {
-      console.log("[debug] ignoring hostPlay for apple (no openExternal, no resume)");
-      //const ok = await window.api.openExternal(nowPlaying.track.url);
-      // if (!ok) el("sessionMeta").textContent = "Could not open Apple Music.";
-      return;
-    }
-
-    // If nothing playing, start first queue item
     if (!nowPlaying?.queueId && queue.length) {
       await hostPlayQueueItem(queue[0]);
+      return;
+    }
+    if (!nowPlaying?.track) return;
+
+
+    const willPlay = !nowPlaying.isPlaying;
+
+    hostIntentIsPlaying = willPlay;
+
+    // ✅ Tell the local provider first (host is the source of truth for play/pause)
+    try {
+      if (playbackSource === "apple") {
+        if (willPlay) await applePlay();
+        else await applePause();
+      } else if (playbackSource === "spotify") {
+        if (willPlay) await playerPlay();
+        else await playerPause();
+      }
+    } catch (e) {
+      console.warn("[play/pause] provider command failed", e);
+    }
+
+    // ✅ Broadcast shared state (no manual timestamps)
+    nowPlaying = {
+      ...nowPlaying,
+      isPlaying: willPlay,
+      // keep the last provider-derived playhead (don’t overwrite it)
+      playheadMs: Number(nowPlaying.playheadMs || 0),
+      updatedAt: Date.now(),
+    };
+
+    send("host:state", { sessionId, nowPlaying });
+    renderNowPlaying();
+  });
+
+
+  el("npNext")?.addEventListener("click", async () => {
+    if (!isHostNow()) return;
+
+    // keep intent in sync with UI state
+    hostIntentIsPlaying = !!nowPlaying?.isPlaying;
+
+    // just advance; hostPlayQueueItem() will reassert play if needed
+    await playerNext();
+  });
+
+  el("npPrev")?.addEventListener("click", async () => {
+    if (!isHostNow()) return;
+
+    const wasPlaying = hostIntentIsPlaying;
+    await playerPrev();
+
+    if (wasPlaying) {
+      try {
+        if (playbackSource === "apple") await applePlay();
+        else if (playbackSource === "spotify") await playerPlay();
+      } catch {}
     }
   });
 
-  el("hostPause")?.addEventListener("click", async () => {
-    const isHost = userId && hostUserId && userId === hostUserId;
-    if (!isHost) return;
+  // Seek bar
+  const prog = el("nowPlaying")?.querySelector(".npProgress");
+  if (prog) {
+    let dragging = false;
 
-    // Pause only meaningful for iTunes; for spotify we just mark paused
-    if (nowPlaying?.track?.source === "itunes") {
-      await window.api.itunes.pause();
-    }
+    const pctFromEvent = (ev) => {
+      const rect = prog.getBoundingClientRect();
+      const x = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+      return Math.max(0, Math.min(1, (x - rect.left) / rect.width));
+    };
 
-    if (nowPlaying) {
-      nowPlaying = {
-        ...nowPlaying,
-        isPlaying: false,
-        updatedAt: Date.now()
-      };
-      send("host:state", { sessionId, nowPlaying });
+    const previewToPct = (pct) => {
+      const dur = nowPlaying?.track?.durationMs || 0;
+      if (!dur) return;
+      const ms = dur * pct;
+      el("npBar") && (el("npBar").style.width = `${pct * 100}%`);
+      el("npPos") && (el("npPos").textContent = fmtMs(ms));
+      el("npThumb") && (el("npThumb").style.left = `${pct * 100}%`);
+    };
+
+    // const commitToPct = async (pct) => {
+    //   if (!nowPlaying?.track) return;
+
+    //   let durMs = Number(nowPlaying.track.durationMs || 0);
+
+    //   // ✅ Spotify: use the real playing item's duration from the SDK
+    //   if (playbackSource === "spotify") {
+    //     try {
+    //       const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
+    //       const s = await spotifyGetPlaybackState();
+    //       if (s?.duration) durMs = Number(s.duration);
+    //     } catch {}
+    //   }
+
+    //   if (!durMs) return;
+
+    //   // Clamp pct and compute target
+    //   pct = Math.max(0, Math.min(1, pct));
+    //   const targetMs = Math.max(0, Math.min(durMs - 250, Math.floor(durMs * pct))); // avoid seeking past end
+    //   const secs = targetMs / 1000;
+
+    //   await playerSeek(secs);
+
+    //   // Broadcast (host) so everyone syncs
+    //   const playheadMs = Math.floor(secs * 1000);
+    //   nowPlaying = {
+    //     ...nowPlaying,
+    //     playheadMs,
+    //     startedAt: nowPlaying.isPlaying ? (Date.now() - playheadMs) : nowPlaying.startedAt,
+    //     updatedAt: Date.now(),
+    //   };
+
+    //   send("host:state", { sessionId, nowPlaying });
+    //   renderNowPlaying();
+    // };
+
+    prog.addEventListener("mousedown", async (e) => {
+      if (!isHostNow() || !nowPlaying) return;
+
+      isScrubbing = true;
+      scrubWasPlaying = !!nowPlaying.isPlaying;
+
+      // Optional but recommended for smoothness:
+      // pause locally while scrubbing if it was playing
+      if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+        try { await playerPause(); } catch {}
+      }
+
+      dragging = true;
+      setScrubbing(true);
+      previewToPct(pctFromEvent(e));
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      previewToPct(pctFromEvent(e));
+    });
+
+    window.addEventListener("mouseup", async (e) => {
+      if (!dragging) return;
+      dragging = false;
+
+      if (!isHostNow() || !nowPlaying) { isScrubbing = false; return; }
+
+      const pct = pctFromEvent(e);
+      const dur = nowPlaying.track?.durationMs || 0;
+      if (dur) {
+        const secs = (dur * pct) / 1000;
+
+        // seek
+        await playerSeek(secs);
+
+        // resume if it was playing
+        if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+          try { await playerPlay(); } catch {}
+        }
+
+        // broadcast accurate shared state
+        const playheadMs = Math.floor(secs * 1000);
+        nowPlaying = {
+          ...nowPlaying,
+          playheadMs,
+          updatedAt: Date.now(),
+        };
+        send("host:state", { sessionId, nowPlaying });
+        renderNowPlaying();;
+      }
+
+      isScrubbing = false;
+      setScrubbing(false);
       renderNowPlaying();
-    }
-  });
+    });
 
-  el("hostNext")?.addEventListener("click", async () => {
-    await playNextInSharedQueue();
-  });
+
+  }
 
   window.addEventListener("message", (event) => {
     // Security: only accept messages from our own origin
@@ -846,6 +1202,8 @@ function wireUi() {
 
     console.log("[spotify] token received via postMessage");
   });
+
+
 
   // Spotify connect
   function waitForSpotifyToken({ timeoutMs = 60_000 } = {}) {
@@ -867,6 +1225,17 @@ function wireUi() {
 
   el("connectSpotify")?.addEventListener("click", async () => {
     try {
+      // Web: if we already have a refresh token, refresh silently and skip popup.
+      if (!window?.api?.spotifyConnect) {
+        const { spotifyEnsureAccessToken } = await import("./providers/spotify.js");
+        const rt = localStorage.getItem("spotify:refresh_token") || "";
+        if (rt) {
+          await spotifyEnsureAccessToken();
+          el("sessionMeta").textContent = "Spotify connected!";
+          await reloadMusic();
+          return;
+        }
+      }
       const ipcSpotifyConnect = window?.api?.spotifyConnect;
 
       // Electron path (unchanged)
@@ -909,10 +1278,16 @@ function wireUi() {
   });
 
   el("playbackSource")?.addEventListener("change", async () => {
+    await stopAllLocalPlayback();
     playbackSource = el("playbackSource").value;
     localStorage.setItem(PLAYBACK_SOURCE_KEY, playbackSource);
 
-    // If something is currently playing, re-sync immediately
+    lastLoadedQueueKey = "";
+
+    // start/stop UI pollers based on source
+    if (playbackSource === "apple") startAppleStateSync();
+    else stopAppleStateSync();
+
     await syncClientToNowPlaying();
   });
 
@@ -926,4 +1301,5 @@ renderLoopToggle();
 renderShareButton();
 renderPlaybackSource();
 setSource(musicSource);
-startHostPolling();
+startUiTick();
+startHostAutoAdvance();

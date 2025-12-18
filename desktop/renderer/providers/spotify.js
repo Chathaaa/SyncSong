@@ -2,6 +2,56 @@
 // Exports useful functions the app uses: getSpotifyAccessToken, spotifyFetch, spotifyApi,
 // ensureSpotifyWebPlayer, spotifyPlayUriInApp
 
+const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
+let spotifyPlaybackPrepared = false;
+let spotifyPreparedDeviceId = "";
+let __lastVolume = 0.8;
+
+function getStoredClientId() {
+  return localStorage.getItem("spotify:client_id") || "e87ab2180d5a438ba6f23670e3c12f3d";
+}
+
+function tokenIsValidSoon() {
+  const tok = localStorage.getItem("spotify:access_token") || "";
+  const exp = Number(localStorage.getItem("spotify:expires_at") || "0");
+  if (!tok) return false;
+  // treat as expired if within 60s of expiry
+  return !exp || Date.now() < exp - 60_000;
+}
+
+export async function spotifyRefreshAccessToken() {
+  const refreshToken = localStorage.getItem("spotify:refresh_token") || "";
+  if (!refreshToken) throw new Error("No Spotify refresh token (need to connect once).");
+
+  const clientId = getStoredClientId();
+
+  const res = await fetch(SPOTIFY_TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error_description || "Spotify refresh failed");
+
+  // Spotify may not return refresh_token on refresh; keep the old one.
+  if (json.access_token) localStorage.setItem("spotify:access_token", json.access_token);
+  if (json.expires_in) localStorage.setItem("spotify:expires_at", String(Date.now() + json.expires_in * 1000));
+  if (json.refresh_token) localStorage.setItem("spotify:refresh_token", json.refresh_token);
+
+  return json.access_token;
+}
+
+export async function spotifyEnsureAccessToken() {
+  if (tokenIsValidSoon()) return localStorage.getItem("spotify:access_token");
+  // try silent refresh
+  return spotifyRefreshAccessToken();
+}
+
 export function getSpotifyAccessToken() {
   const tok = localStorage.getItem("spotify:access_token") || "";
   const exp = Number(localStorage.getItem("spotify:expires_at") || "0");
@@ -20,8 +70,8 @@ function cryptoRandomId() {
 }
 
 export async function spotifyFetch(path, opts = {}) {
-  const token = getSpotifyAccessToken();
-  if (!token) throw new Error("Spotify not connected (or token expired). Click Connect Spotify.");
+  const token = await spotifyEnsureAccessToken();
+  if (!token) throw new Error("Spotify not connected. Click Connect Spotify.");
 
   const res = await fetch(`https://api.spotify.com/v1${path}`, {
     method: opts.method || "GET",
@@ -119,6 +169,32 @@ export async function ensureSpotifyWebPlayer() {
   return spotifyPlayer;
 }
 
+export async function spotifyPreparePlaybackDevice() {
+  await ensureSpotifyWebPlayer();
+  await (deviceReadyPromise || waitForDeviceId());
+  if (!spotifyDeviceId) return;
+
+  // Only do this once per device_id
+  if (spotifyPlaybackPrepared && spotifyPreparedDeviceId === spotifyDeviceId) return;
+
+  try {
+    // Prevent "same song restarts" + weird queue behavior
+    await spotifyApi(`/me/player/shuffle?state=false&device_id=${encodeURIComponent(spotifyDeviceId)}`, {
+      method: "PUT",
+    });
+  } catch {}
+
+  try {
+    await spotifyApi(`/me/player/repeat?state=off&device_id=${encodeURIComponent(spotifyDeviceId)}`, {
+      method: "PUT",
+    });
+  } catch {}
+
+  spotifyPlaybackPrepared = true;
+  spotifyPreparedDeviceId = spotifyDeviceId;
+}
+
+
 export async function spotifyPlayUriInApp(spotifyUri) {
   if (!spotifyUri) throw new Error("Missing spotifyUri on track.");
 
@@ -126,6 +202,8 @@ export async function spotifyPlayUriInApp(spotifyUri) {
   await (deviceReadyPromise || waitForDeviceId()); // <- wait for ready
 
   if (!spotifyDeviceId) throw new Error("Spotify device_id not ready yet.");
+
+  await spotifyPreparePlaybackDevice();
 
   await spotifyApi(`/me/player/play?device_id=${encodeURIComponent(spotifyDeviceId)}`, {
     method: "PUT",
@@ -166,31 +244,33 @@ export async function loadSpotifyTracks(playlistId) {
       durationMs: t.duration_ms || 0,
       spotifyTrackId: t.id,
       spotifyUri: t.uri,
-      spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
+      //spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
+      artworkUrl: t.album?.images?.[0]?.url || "",
+
     }));
 
   return { tracks };
 }
 
 export async function spotifyFindUriForTrack(track) {
-  // If the shared track already IS spotify and has uri, easy:
   if (track.source === "spotify" && track.spotifyUri) return track.spotifyUri;
 
-  // Otherwise search by title + artist:
+  // If ISRC exists, this is the best match
+  if (track.isrc) {
+    const q = encodeURIComponent(`isrc:${track.isrc}`);
+    const res = await spotifyFetch(`/search?type=track&limit=1&q=${q}`);
+    const hit = res?.tracks?.items?.[0];
+    if (hit?.uri) return hit.uri;
+  }
+
+  // Fallback: title + artist (your existing behavior)
   const q = encodeURIComponent(`${track.title} ${track.artist}`.trim());
   const res = await spotifyFetch(`/search?type=track&limit=5&q=${q}`);
 
   const items = res?.tracks?.items || [];
   if (!items.length) return null;
 
-  // Pick best match (very simple heuristic)
-  const tTitle = norm(track.title);
-  const tArtist = norm(track.artist);
-
-  const best =
-    items.find(x => norm(x.name) === tTitle && norm(x.artists?.[0]?.name) === tArtist) ||
-    items[0];
-
+  const best = items[0];
   return best?.uri || null;
 }
 
@@ -245,4 +325,62 @@ export async function spotifyWebConnect() {
   // Popup window
   const w = window.open(authUrl, "spotify_auth", "width=520,height=680");
   if (!w) throw new Error("Popup blocked. Allow popups and try again.");
+}
+
+
+export async function spotifyPlay() {
+  const p = await ensureSpotifyWebPlayer();
+  await p.resume();
+}
+
+export async function spotifyPause() {
+  const p = await ensureSpotifyWebPlayer();
+  await p.pause();
+}
+
+export async function spotifySeek(seconds) {
+  const p = await ensureSpotifyWebPlayer();
+  // SDK expects milliseconds
+  await p.seek(Math.max(0, Math.floor(seconds * 1000)));
+}
+
+export async function spotifyNext() {
+  await ensureSpotifyWebPlayer(); // ensure device exists/active
+  await spotifyApi("/me/player/next", { method: "POST" });
+}
+
+export async function spotifyPrev() {
+  await ensureSpotifyWebPlayer();
+  await spotifyApi("/me/player/previous", { method: "POST" });
+}
+
+// Helpful for UI progress + play state
+export async function spotifyGetPlaybackState() {
+  const p = await ensureSpotifyWebPlayer();
+  return p.getCurrentState(); // { paused, position, duration, track_window, ... } or null
+}
+
+export async function spotifySetVolume(v) {
+  try {
+    const p = await ensureSpotifyWebPlayer(); // whatever returns your SDK player
+    if (!p?.setVolume) return;
+    __lastVolume = Math.max(0, Math.min(1, Number(v)));
+    await p.setVolume(__lastVolume);
+  } catch {}
+}
+
+export async function spotifyDuckForTransition(ms = 450) {
+  try {
+    const p = await ensureSpotifyWebPlayer();
+    if (!p?.getVolume || !p?.setVolume) return;
+
+    const current = await p.getVolume();
+    // store “real” current volume to restore precisely
+    __lastVolume = (typeof current === "number") ? current : __lastVolume;
+
+    await p.setVolume(0);
+    setTimeout(() => {
+      try { p.setVolume(__lastVolume); } catch {}
+    }, ms);
+  } catch {}
 }
