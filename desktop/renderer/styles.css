@@ -298,6 +298,24 @@ button:disabled{ opacity: .42; cursor: not-allowed; }
   flex-wrap: wrap;
 }
 
+
+/* Volume control (local) */
+.volCtl{
+  display:flex;
+  align-items:center;
+  gap: 8px;
+  padding: 2px 6px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.volCtl input[type="range"]{
+  width: 140px;
+}
+.volLabel{ opacity: .85; font-size: 12px; }
+.volVal{ opacity: .85; font-variant-numeric: tabular-nums; font-size: 12px; min-width: 46px; text-align:right; }
+ 
+
 /* -------------------------
    Now Playing
    ------------------------- */

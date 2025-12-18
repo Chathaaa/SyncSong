@@ -12,7 +12,7 @@ const controls = makeControls({
   onPrevShared: () => playPrevInSharedQueue(),
 });
 
-const { playerPlay, playerPause, playerSeek, playerNext, playerPrev } = controls;
+const { playerPlay, playerPause, playerSeek, playerNext, playerPrev, playerSetVolume } = controls;
 
 
 let ws;
@@ -60,6 +60,13 @@ const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
 
 const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
 let playbackSource = localStorage.getItem(PLAYBACK_SOURCE_KEY) || "apple";
+
+
+const VOLUME_KEY = "syncsong:playerVolume01"; // 0..1 local-only
+let playerVolume01 = (() => {
+  const v = Number(localStorage.getItem(VOLUME_KEY));
+  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
+})();
 
 const isWeb = typeof window.api === "undefined";
 
@@ -884,7 +891,7 @@ function startHostAutoAdvance() {
 
         // Track last good position so we can detect the "snap to 0 when ended"
         if (posMs > lastApplePosMs) lastApplePosMs = posMs;
-        console.log(posMs)
+        
         providerIsPlaying = !!a.isPlaying;
 
         const nearEnd = durMs > 10_000 && posMs >= durMs - END_BUFFER_MS;
@@ -1289,7 +1296,31 @@ function wireUi() {
     else stopAppleStateSync();
 
     await syncClientToNowPlaying();
+    try { await playerSetVolume(playerVolume01); } catch {}
   });
+
+  // Local volume slider (does not sync across users)
+  const vol = el("playerVolume");
+  const volVal = el("playerVolumeVal");
+  if (vol) {
+    vol.value = String(Math.round(playerVolume01 * 100));
+    if (volVal) volVal.textContent = `${Math.round(playerVolume01 * 100)}%`;
+
+    const apply = async () => {
+      try { await playerSetVolume(playerVolume01); } catch {}
+    };
+
+    vol.addEventListener("input", async () => {
+      playerVolume01 = Math.max(0, Math.min(1, Number(vol.value) / 100));
+      localStorage.setItem(VOLUME_KEY, String(playerVolume01));
+      if (volVal) volVal.textContent = `${Math.round(playerVolume01 * 100)}%`;
+      await apply();
+    });
+
+    // apply on boot
+    apply();
+  }
+
 
 }
 

@@ -1,7 +1,7 @@
 // Renderer-side Apple Music helpers (extracted from app.js)
 // Exports: APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken,
 // ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized,
-// appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext
+// appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext, appleSetVolume
 
 let wiredForInstance = null;
 let appleState = { isPlaying: false, positionMs: 0, durationMs: 0 };
@@ -216,6 +216,17 @@ export async function appleNext() {
   const mk = await appleEnsureAuthorized();
   mk.skipToNextItem();
 }
+
+export async function appleSetVolume(v) {
+  try {
+    const mk = await ensureAppleConfigured();
+    const vol = Math.max(0, Math.min(1, Number(v)));
+    // MusicKit volume is 0..1; set on instance if available
+    if (typeof mk.volume !== "undefined") mk.volume = vol;
+    else if (mk.player && typeof mk.player.volume !== "undefined") mk.player.volume = vol;
+  } catch {}
+}
+
 
 // Playlist & library helpers
 export async function loadApplePlaylistsAndTracks() {
