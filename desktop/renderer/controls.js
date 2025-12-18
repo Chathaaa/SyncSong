@@ -1,6 +1,6 @@
 // controls.js
-import { ensureSpotifyWebPlayer, spotifyApi } from "./providers/spotify.js";
-import { applePlay, applePause, appleNext } from "./providers/apple.js";
+import { ensureSpotifyWebPlayer, spotifyApi, spotifySetVolume } from "./providers/spotify.js";
+import { applePlay, applePause, appleNext, appleSetVolume } from "./providers/apple.js";
 
 // IMPORTANT: app.js must pass in getters so controls knows current state.
 export function makeControls({ getPlaybackSource, getNowPlaying, onNextShared, onPrevShared }) {
@@ -59,5 +59,20 @@ export function makeControls({ getPlaybackSource, getNowPlaying, onNextShared, o
     return playerPlay();
   }
 
-  return { playerPlay, playerPause, playerSeek, playerNext, playerPrev, playerToggle };
+  
+  async function playerSetVolume(v01) {
+    const src = getPlaybackSource();
+    const v = Math.max(0, Math.min(1, Number(v01)));
+    if (src === "spotify") {
+      await spotifySetVolume(v);
+      return;
+    }
+    if (src === "apple") {
+      await appleSetVolume(v);
+      return;
+    }
+  }
+
+  return { playerPlay, playerPause, playerSeek, playerNext, playerPrev, playerToggle, playerSetVolume };
+ 
 }
