@@ -60,8 +60,6 @@ export async function ensureAppleConfigured() {
   return mk;
 }
 
-
-
 export async function appleFetch(path) {
   const devToken = localStorage.getItem("syncsong:appleDevToken");
   const userToken = getAppleUserToken();
@@ -81,6 +79,28 @@ export async function appleFetch(path) {
     throw new Error(msg);
   }
   return json;
+}
+
+function applePathFromNext(next) {
+  if (!next) return null;
+  // Apple often returns "/v1/..." (or sometimes a full URL)
+  if (next.startsWith("https://")) {
+    const i = next.indexOf("/v1");
+    next = i >= 0 ? next.slice(i) : next;
+  }
+  // appleFetch already prefixes "https://api.music.apple.com/v1"
+  return next.startsWith("/v1") ? next.slice(3) : next; // -> "/me/library/..."
+}
+
+async function appleFetchAllPages(firstPath) {
+  const out = [];
+  let path = firstPath;
+  while (path) {
+    const data = await appleFetch(path);
+    if (data?.data?.length) out.push(...data.data);
+    path = applePathFromNext(data?.next);
+  }
+  return out;
 }
 
 // --- Apple playback state ---
@@ -277,8 +297,7 @@ export async function loadApplePlaylistsAndTracks() {
     return { playlists: [], tracks: [], note: "Click \u201CConnect Apple\u201D to load your library playlists." };
   }
 
-  const data = await appleFetch("/me/library/playlists?limit=100");
-  const pls = data.data || [];
+  const pls = await appleFetchAllPages("/me/library/playlists?limit=100");
 
   const playlists = pls.map(p => ({ id: p.id, name: p.attributes?.name || "Untitled" }));
   return { playlists };
@@ -287,8 +306,7 @@ export async function loadApplePlaylistsAndTracks() {
 export async function loadAppleTracks(playlistId) {
   localStorage.setItem("syncsong:lastApplePlaylistId", String(playlistId));
 
-  const data = await appleFetch(`/me/library/playlists/${playlistId}/tracks?limit=100`);
-  const items = data.data || [];
+  const items = await appleFetchAllPages(`/me/library/playlists/${playlistId}/tracks?limit=100`);
 
   function appleFallbackUrlFromTrack(t) {
     const name = t.attributes?.name || "";
