@@ -31,14 +31,21 @@
 <body>
   <div class="topbar">
     <div class="brand">SyncSong</div>
-    <div class="session">
+    <div class="session" id="topbarPreSession">
       <input id="displayName" placeholder="Display name" />
-      <button id="createSession">Create</button>
       <input id="joinCode" placeholder="Join code" />
       <button id="joinSession">Join</button>
       <button id="copySession">Copy invite</button>
+      <button id="rejoinLast" style="display:none;">Rejoin last</button>
       <div class="sessionMeta" id="sessionMeta"></div>
-      
+      <div class="sessionHint" id="autoRoomHint" style="display:none;"></div>
+      <div class="sessionMeta" id="sessionPeople" style="display:none;"></div>
+    </div>
+
+    <div class="sessionHeader" id="topbarInSession" style="display:none;">
+      <div class="hdrLine" id="sessionHeaderText">🎧 SyncSong | Room: ---- | You: --- | Host: ---</div>
+      <button id="copySession2" class="smallBtn" type="button">Copy invite</button>
+      <button id="leaveSession" class="smallBtn" type="button" title="Leave room">Leave</button>
     </div>
   </div>
 
@@ -99,8 +106,8 @@
         <label style="margin-right:8px;">
           Listen on:
           <select id="playbackSource">
-            <option value="apple">Apple Music</option>
             <option value="spotify">Spotify</option>
+            <option value="apple">Apple Music</option>
           </select>
         </label>
         <!-- <button id="hostPlay">Play</button>

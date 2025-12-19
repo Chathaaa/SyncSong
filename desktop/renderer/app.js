@@ -61,8 +61,31 @@ const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
 const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
 
 const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
-let playbackSource = localStorage.getItem(PLAYBACK_SOURCE_KEY) || "apple";
 
+function hasSpotifyAuth() {
+  return !!(localStorage.getItem("spotify:refresh_token") || localStorage.getItem("spotify:access_token"));
+}
+function hasAppleAuth() {
+  return !!localStorage.getItem(APPLE_USER_TOKEN_KEY);
+}
+
+// Prefer stored choice *only if* that provider is actually connected.
+// Otherwise fall back to whichever provider is connected.
+function pickInitialPlaybackSource() {
+  const stored = localStorage.getItem(PLAYBACK_SOURCE_KEY);
+  if (stored === "spotify" && hasSpotifyAuth()) return "spotify";
+  if (stored === "apple" && hasAppleAuth()) return "apple";
+  if (hasSpotifyAuth()) return "spotify";
+  if (hasAppleAuth()) return "apple";
+  return stored || "apple";
+}
+
+let playbackSource = pickInitialPlaybackSource();
+
+const DISPLAY_NAME_KEY = "syncsong:displayName";
+const AUTO_ROOM_HINT_SEEN_KEY = "syncsong:autoRoomHintSeen";
+const LAST_SESSION_KEY = "syncsong:lastSessionId";
+const LAST_SESSION_AT_KEY = "syncsong:lastSessionAt";
 
 const VOLUME_KEY = "syncsong:playerVolume01"; // 0..1 local-only
 let playerVolume01 = (() => {
@@ -129,7 +152,7 @@ async function copyTextToClipboard(text) {
 }
 
 function getInviteText() {
-  return `Join my SyncSong session: ${sessionId}\n\nOpen the app → paste the code → Join.`;
+  return `Join my SyncSong session: ${sessionId}\n\n`;
 }
 
 function renderShareButton() {
@@ -155,13 +178,131 @@ async function autoCopyInvitePulse() {
   }
 }
 
+function getDisplayName(defaultName) {
+  const v = (el("displayName")?.value || localStorage.getItem(DISPLAY_NAME_KEY) || defaultName || "").trim();
+  return (v || defaultName || "Guest").slice(0, 32);
+}
+
+function updatePeopleMeta() {
+  const box = el("sessionPeople");
+  if (!box) return;
+
+  if (!sessionId) {
+    box.style.display = "none";
+    box.textContent = "";
+    return;
+  }
+
+  const names = [];
+
+  // Always include "You"
+  const you = (el("displayName")?.value || localStorage.getItem(DISPLAY_NAME_KEY) || "You").trim();
+  if (you) names.push(you);
+
+  // Add anyone we've seen contribute (from queue metadata)
+  for (const q of (queue || [])) {
+    const n = q?.addedBy?.displayName;
+    if (n) names.push(String(n).trim());
+  }
+
+  const set = new Set(names.filter(Boolean));
+  const uniq = Array.from(set).slice(0, 8);
+  const extra = Math.max(0, set.size - uniq.length);
+
+  box.style.display = "block";
+  box.textContent = `Listening: ${uniq.join(", ")}${extra ? ` +${extra}` : ""}`;
+}
+
+function renderRejoinButton() {
+  const btn = el("rejoinLast");
+  if (!btn) return;
+
+  // only show when NOT in a session
+  if (sessionId) {
+    btn.style.display = "none";
+    return;
+  }
+
+  const last = (localStorage.getItem(LAST_SESSION_KEY) || "").trim().toUpperCase();
+  const at = Number(localStorage.getItem(LAST_SESSION_AT_KEY) || 0);
+
+  // hide if empty or very old (7 days)
+  const tooOld = !at || (Date.now() - at) > 7 * 24 * 60 * 60 * 1000;
+  if (!last || tooOld) {
+    btn.style.display = "none";
+    return;
+  }
+
+  btn.style.display = "inline-block";
+  btn.textContent = `Rejoin ${last}`;
+}
+
 // ---------- Session meta ----------
 function renderSessionMeta() {
   const isHost = userId && hostUserId && userId === hostUserId;
-  el("sessionMeta").textContent = sessionId
-    ? `Session: ${sessionId} ${isHost ? "(Host)" : ""}`
-    : "No session";
+  
+  // Toggle topbar modes
+  const pre = el("topbarPreSession");
+  const ins = el("topbarInSession");
+  if (sessionId) {
+    if (pre) pre.style.display = "none";
+    if (ins) ins.style.display = "flex";
+  } else {
+    if (pre) pre.style.display = "flex";
+    if (ins) ins.style.display = "none";
+  }
+
+  // Update header text when in session
+  if (sessionId) {
+    const you = (el("displayName")?.value || localStorage.getItem(DISPLAY_NAME_KEY) || "You").trim() || "You";
+    const hostLabel = hostUserId
+      ? (hostUserId === userId ? you : "Host")
+      : "Host";
+
+    const hdr = el("sessionHeaderText");
+    if (hdr) {
+      hdr.textContent = `🎧 SyncSong | Room: ${sessionId} | You: ${you}${isHost ? " (host)" : ""} | Host: ${hostLabel}`;
+    }
+  }
+
+  // Keep existing share/copy logic if you have it
   renderShareButton();
+  renderRejoinButton();
+  updatePeopleMeta();
+  // If we're in a session, the auto-room hint is no longer relevant
+  if (sessionId) el("autoRoomHint") && (el("autoRoomHint").style.display = "none");
+}
+
+async function leaveSession() {
+  if (!sessionId) return;
+
+  const leavingSessionId = sessionId;
+
+  // Stop playback/timers first so we don’t keep playing after leaving
+  try { await stopAllLocalPlayback(); } catch {}
+
+  // Best-effort notify server (safe if server ignores this message)
+  try { send("session:leave", { sessionId: leavingSessionId }); } catch {}
+
+  // Clear local session state
+  sessionId = null;
+  hostUserId = null;
+  queue = [];
+  nowPlaying = null;
+  localActiveQueueId = "";
+  lastLoadedQueueKey = "";
+  pendingCreate = false;
+  autoAdvanceLock = false;
+
+  // Reset UI fields
+  if (el("joinCode")) el("joinCode").value = "";
+
+  // Re-render UI back to pre-session mode
+  try { renderNowPlaying(); } catch {}
+  try { renderQueue(); } catch {}
+  try { renderSessionMeta(); } catch {}
+
+  if (el("sessionMeta")) el("sessionMeta").textContent = "Left room.";
 }
 
 // ---------- WS ----------
@@ -171,6 +312,7 @@ function connectWS() {
   ws.onopen = () => {
     el("sessionMeta").textContent = "Connected";
     pendingCreate = false; // allow session:create to be attempted again
+    renderRejoinButton();
   };
 
   ws.onmessage = (e) => {
@@ -183,6 +325,8 @@ function connectWS() {
 
     if (msg.type === "session:created") {
       sessionId = msg.sessionId;
+      localStorage.setItem(LAST_SESSION_KEY, sessionId);
+      localStorage.setItem(LAST_SESSION_AT_KEY, String(Date.now()));
       pendingCreate = false;
       renderSessionMeta();
 
@@ -202,8 +346,11 @@ function connectWS() {
 
     if (msg.type === "session:state") {
       sessionId = msg.sessionId;
+      localStorage.setItem(LAST_SESSION_KEY, sessionId);
+      localStorage.setItem(LAST_SESSION_AT_KEY, String(Date.now()));
       hostUserId = msg.hostUserId;
       queue = msg.queue || [];
+      updatePeopleMeta();
       nowPlaying = msg.nowPlaying || null;
       renderSessionMeta();
       renderQueue();
@@ -214,6 +361,7 @@ function connectWS() {
 
     if (msg.type === "queue:updated") {
       queue = msg.queue || [];
+      updatePeopleMeta();
       renderQueue();
       return;
     }
@@ -935,21 +1083,58 @@ async function advanceNextLikeButton() {
   // hostPlayQueueItem() will do it after the new track is loaded.
 }
 
+async function switchPlaybackSource(next) {
+  if (!next || next === playbackSource) return;
+
+  // switching sources mid-session should be clean
+  await stopAllLocalPlayback();
+
+  playbackSource = next;
+  localStorage.setItem(PLAYBACK_SOURCE_KEY, playbackSource);
+  renderPlaybackSource();
+
+  // force a reload of the currently shared track on the new provider
+  lastLoadedQueueKey = "";
+
+  if (playbackSource === "apple") startAppleStateSync();
+  else stopAppleStateSync();
+
+  await syncClientToNowPlaying();
+}
 
 // ---------- Button wiring ----------
 function wireUi() {
   const isHostNow = () => userId && hostUserId && userId === hostUserId;
   // Session buttons
-  el("createSession")?.addEventListener("click", () => {
-    const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
-    send("session:create", { displayName });
-  });
+
+  // Display name: everyone can set this; persist locally
+  const dn = el("displayName");
+  if (dn) {
+    const saved = (localStorage.getItem(DISPLAY_NAME_KEY) || "").trim();
+    if (!dn.value && saved) dn.value = saved;
+    dn.addEventListener("input", () => {
+      const v = (dn.value || "").trim().slice(0, 32);
+      localStorage.setItem(DISPLAY_NAME_KEY, v);
+    });
+  }
+
+  // One-time hint: rooms are created automatically
+  const hint = el("autoRoomHint");
+  if (hint && !sessionId && !localStorage.getItem(AUTO_ROOM_HINT_SEEN_KEY)) {
+    hint.textContent = "Rooms are created automatically when the host adds a song.";
+    hint.style.display = "block";
+    localStorage.setItem(AUTO_ROOM_HINT_SEEN_KEY, "1");
+    setTimeout(() => { if (!sessionId) hint.style.display = "none"; }, 8000);
+  }
 
   el("joinSession")?.addEventListener("click", () => {
-    const displayName = (el("displayName").value || "Guest").trim().slice(0, 32);
+    const displayName = getDisplayName("Guest");
     const code = (el("joinCode").value || "").trim().toUpperCase();
     if (!code) return;
     send("session:join", { sessionId: code, displayName });
+
+    // Hide hint once user takes action
+    if (el("autoRoomHint")) el("autoRoomHint").style.display = "none";
   });
 
   // Copy invite
@@ -964,6 +1149,22 @@ function wireUi() {
     } else {
       el("sessionMeta").textContent = "Couldn’t copy to clipboard.";
     }
+  });
+
+  // Copy button in "in-session" header
+  el("copySession2")?.addEventListener("click", async () => {
+    await copyInvite();
+  });
+
+  el("leaveSession")?.addEventListener("click", async () => {
+    await leaveSession();
+  });
+
+  el("rejoinLast")?.addEventListener("click", () => {
+    const code = (localStorage.getItem(LAST_SESSION_KEY) || "").trim().toUpperCase();
+    if (!code) return;
+    const displayName = getDisplayName("Guest");
+    send("session:join", { sessionId: code, displayName });
   });
 
   // Source toggle + reload
@@ -1224,21 +1425,10 @@ function wireUi() {
         if (rt) {
           await spotifyEnsureAccessToken();
           el("sessionMeta").textContent = "Spotify connected!";
+          await switchPlaybackSource("spotify");
           await reloadMusic();
           return;
         }
-      }
-      const ipcSpotifyConnect = window?.api?.spotifyConnect;
-
-      // Electron path (unchanged)
-      if (typeof ipcSpotifyConnect === "function") {
-        const tok = await ipcSpotifyConnect();
-        localStorage.setItem("spotify:access_token", tok.access_token);
-        localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
-        localStorage.setItem("spotify:expires_at", String(Date.now() + tok.expires_in * 1000));
-        el("sessionMeta").textContent = "Spotify connected!";
-        await reloadMusic();
-        return;
       }
 
       // Web path
@@ -1247,8 +1437,17 @@ function wireUi() {
 
       // IMPORTANT: wait for callback to store token before using Spotify API
       await waitForSpotifyToken();
-      el("sessionMeta").textContent = "Spotify connected!";
-      await reloadMusic();
+      try {
+        const { spotifyFetch } = await import("./providers/spotify.js");
+        await spotifyFetch("/me"); // forces allowlist/premium issues to show immediately
+        
+        el("sessionMeta").textContent = "Spotify connected!";
+        await switchPlaybackSource("spotify");
+        await reloadMusic();
+      } catch (e) {
+        // Keep the token (OAuth succeeded), but give a clear next step.
+        el("sessionMeta").textContent = (e?.message || String(e));
+      }
 
     } catch (e) {
       console.error("[spotify] connect failed", e);
@@ -1263,6 +1462,7 @@ function wireUi() {
       const userToken = await mk.authorize(); // triggers Apple sign-in
       localStorage.setItem(APPLE_USER_TOKEN_KEY, userToken);
       el("sessionMeta").textContent = "Apple Music connected!";
+      await switchPlaybackSource();
       await reloadMusic();
     } catch (e) {
       el("sessionMeta").textContent = "Apple connect failed: " + (e?.message || String(e));
@@ -1349,6 +1549,7 @@ function wireUi() {
 // ---------- Boot ----------
 connectWS();
 wireUi();
+renderRejoinButton();
 renderMusicTabs();
 renderLoopToggle();
 renderShareButton();

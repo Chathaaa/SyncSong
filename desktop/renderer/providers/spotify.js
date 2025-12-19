@@ -69,6 +69,24 @@ function cryptoRandomId() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
 }
 
+function spotifyPathFromNext(nextUrl) {
+  if (!nextUrl) return null;
+  // next is a full URL like https://api.spotify.com/v1/...
+  const i = nextUrl.indexOf("/v1");
+  return i >= 0 ? nextUrl.slice(i + 3) : null; // returns "/me/playlists?..."
+}
+
+async function spotifyFetchAllPages(firstPath) {
+  const out = [];
+  let path = firstPath;
+  while (path) {
+    const data = await spotifyFetch(path);
+    if (data?.items?.length) out.push(...data.items);
+    path = spotifyPathFromNext(data?.next);
+  }
+  return out;
+}
+
 export async function spotifyFetch(path, opts = {}) {
   const token = await spotifyEnsureAccessToken();
   if (!token) throw new Error("Spotify not connected. Click Connect Spotify.");
@@ -86,7 +104,24 @@ export async function spotifyFetch(path, opts = {}) {
   if (res.status === 204) return null;
 
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error?.message || `Spotify API error: ${res.status}`);
+  if (!res.ok) {
+  const msg = String(json?.error?.message || json?.error_description || `Spotify API error: ${res.status}`);
+
+  // Dev-mode allowlist / tester restriction
+  if (res.status === 403 && /not registered in the developer dashboard/i.test(msg)) {
+    throw new Error(
+      "This app is in early testing, so only approved Spotify accounts can play music right now." +
+      "You can still use Apple Music, or ask the host to enable your Spotify account."
+    );
+  }
+
+  // Premium requirement is common for playback control / Web Playback SDK flows
+  if (res.status === 403 && /premium/i.test(msg)) {
+    throw new Error("Spotify playback requires a Premium account for this feature. Switch playback to Apple Music, or use a Premium Spotify account.");
+  }
+
+  throw new Error(msg);
+}
   return json;
 }
 
@@ -283,8 +318,7 @@ export async function loadSpotifyPlaylistsAndTracks() {
   const tok = getSpotifyAccessToken();
   if (!tok) throw new Error("Spotify not connected. Click Connect Spotify.");
 
-  const data = await spotifyFetch("/me/playlists?limit=50");
-  const pls = data.items || [];
+  const pls = await spotifyFetchAllPages("/me/playlists?limit=50");
 
   const playlists = pls.map(p => ({ id: p.id, name: p.name }));
 
@@ -295,8 +329,7 @@ export async function loadSpotifyPlaylistsAndTracks() {
 export async function loadSpotifyTracks(playlistId) {
   localStorage.setItem("syncsong:lastSpotifyPlaylistId", String(playlistId));
 
-  const data = await spotifyFetch(`/playlists/${playlistId}/tracks?limit=100`);
-  const items = data.items || [];
+  const items = await spotifyFetchAllPages(`/playlists/${playlistId}/tracks?limit=100`);
 
   const tracks = items
     .map(it => it.track)

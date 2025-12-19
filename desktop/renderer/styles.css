@@ -69,12 +69,43 @@ body{
   letter-spacing: .25px;
 }
 
+.sessionHeader{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  flex:1;
+  justify-content:flex-end;
+  min-width:0;
+}
+.hdrLine{
+  color: var(--muted2);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70vw;
+}
+.smallBtn{
+  height: 30px;
+  padding: 0 10px;
+  border-radius: var(--r2);
+  border: 1px solid rgba(180,198,255,0.16);
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+  cursor:pointer;
+}
+
+#leaveSession:hover{
+  border-color: rgba(255, 120, 120, 0.35);
+}
+
 .session{
   display: flex;
   gap: 8px;
   align-items: center;
   flex: 1;
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .sessionMeta{
@@ -85,6 +116,19 @@ body{
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+#sessionPeople{
+  max-width: 520px;
+}
+
+.sessionHint{
+  flex-basis: 100%;
+  color: var(--muted2);
+  font-size: 12px;
+  opacity: 0.9;
+  margin-top: 2px;
+}
+
 
 #copySession{ display: none; }
 
