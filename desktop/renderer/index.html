@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <link rel="shortcut icon" href="#">
   <meta http-equiv="Content-Security-Policy"
     content="
       default-src 'self';
@@ -107,11 +108,13 @@
         <button id="hostNext">Next</button>
         -->
         <button id="toggleLoop">Loop: On</button> 
-        <label class="volCtl" title="Local volume">
-          <span class="volLabel">Vol</span>
-          <input id="playerVolume" type="range" min="0" max="100" step="1" value="100" />
+        <div class="volCtl" >
+          <!-- <span id="playerMuteTip" class="tip" data-tip="Mute"> -->
+            <button id="playerMute" class="iconBtn" type="button" aria-label="Mute">🔊</button>
+          <!-- </span> -->
+          <input id="playerVolume" class="volSlider" type="range" min="0" max="100" step="1" value="100" />
           <span id="playerVolumeVal" class="volVal">100%</span>
-        </label>
+        </div>
       </div>
 
       <div class="list" id="queue"></div>

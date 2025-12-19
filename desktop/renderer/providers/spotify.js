@@ -141,7 +141,14 @@ export async function ensureSpotifyWebPlayer() {
 
   spotifyPlayer = new window.Spotify.Player({
     name: "SyncSong (In-App)",
-    getOAuthToken: (cb) => cb(getSpotifyAccessToken() || ""),
+    getOAuthToken: async (cb) => {
+      try {
+        const tok = await spotifyEnsureAccessToken();
+        cb(tok || "");
+      } catch {
+        cb("");
+      }
+    },
     volume: 0.8,
   });
 
@@ -194,23 +201,82 @@ export async function spotifyPreparePlaybackDevice() {
   spotifyPreparedDeviceId = spotifyDeviceId;
 }
 
+// Wait until the SDK reports that the current track URI matches `targetUri`.
+// Falls back to polling getCurrentState() in case events are flaky.
+function waitForSpotifyTrackChange(targetUri, { timeoutMs = 1200 } = {}) {
+  return new Promise(async (resolve) => {
+    let done = false;
+
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      resolve(!!ok);
+    };
+
+    // Event-based (best case)
+    const handler = (state) => {
+      const uri = state?.track_window?.current_track?.uri || "";
+      if (uri && uri === targetUri) finish(true);
+    };
+
+    try {
+      if (spotifyPlayer?.addListener) spotifyPlayer.addListener("player_state_changed", handler);
+    } catch {}
+
+    // Poll fallback (some browsers/users see missed events)
+    const start = Date.now();
+    const poll = async () => {
+      if (done) return;
+
+      try {
+        const s = await spotifyPlayer?.getCurrentState?.();
+        const uri = s?.track_window?.current_track?.uri || "";
+        if (uri && uri === targetUri) return finish(true);
+      } catch {}
+
+      if (Date.now() - start >= timeoutMs) return finish(false);
+      setTimeout(poll, 80);
+    };
+    poll();
+
+    // Hard timeout cleanup
+    setTimeout(() => {
+      if (done) return;
+      try {
+        if (spotifyPlayer?.removeListener) spotifyPlayer.removeListener("player_state_changed", handler);
+      } catch {}
+      finish(false);
+    }, timeoutMs + 50);
+  });
+}
+
 
 export async function spotifyPlayUriInApp(spotifyUri) {
   if (!spotifyUri) throw new Error("Missing spotifyUri on track.");
 
-  await ensureSpotifyWebPlayer();
+  const p = await ensureSpotifyWebPlayer();
   await (deviceReadyPromise || waitForDeviceId()); // <- wait for ready
 
   if (!spotifyDeviceId) throw new Error("Spotify device_id not ready yet.");
 
   await spotifyPreparePlaybackDevice();
 
+  // ✅ Kill the “old song blip” first (similar to your Apple pause-first fix)
+  try { await p.pause(); } catch {}
+
+  // Start waiting *before* we issue /play (so we don't miss a fast event)
+  const waitForChange = waitForSpotifyTrackChange(spotifyUri, { timeoutMs: 1400 });
+
   await spotifyApi(`/me/player/play?device_id=${encodeURIComponent(spotifyDeviceId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ uris: [spotifyUri] }),
   });
+
+  // ✅ Wait until the SDK confirms the new item is active (best-effort)
+  try { await waitForChange; } catch {}
 }
+
 
 // Playlist & search helpers
 export async function loadSpotifyPlaylistsAndTracks() {
@@ -306,7 +372,13 @@ export async function spotifyWebConnect() {
   const scopes = [
     "playlist-read-private",
     "playlist-read-collaborative",
+
+    // Web Playback SDK required
     "streaming",
+    "user-read-email",
+    "user-read-private",
+
+    // Your Web API playback calls
     "user-modify-playback-state",
     "user-read-playback-state",
   ].join(" ");

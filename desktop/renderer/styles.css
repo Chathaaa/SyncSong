@@ -299,21 +299,140 @@ button:disabled{ opacity: .42; cursor: not-allowed; }
 }
 
 
-/* Volume control (local) */
-.volCtl{
-  display:flex;
-  align-items:center;
-  gap: 8px;
-  padding: 2px 6px;
+
+/* Tooltip wrapper */
+.tip{
+  position: relative;
+  display: inline-flex;
+}
+.tip::after{
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100%  8px);
+  transform: translateX(-50%);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .12s ease, transform .12s ease;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(4, 8, 18, 0.95);
+  border: 1px solid rgba(180,198,255,0.20);
   border-radius: 10px;
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 12px 24px rgba(0,0,0,0.35);
 }
-.volCtl input[type="range"]{
-  width: 140px;
+.tip:hover::after{
+  opacity: 1;
+  transform: translateX(-50%) translateY(40px);
 }
-.volLabel{ opacity: .85; font-size: 12px; }
-.volVal{ opacity: .85; font-variant-numeric: tabular-nums; font-size: 12px; min-width: 46px; text-align:right; }
+
+
+/* -------------------------
+   Volume control (local)
+   Matches existing control height/border/panel styling
+   ------------------------- */
+.volCtl{
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border-radius: var(--r2);
+  border: 1px solid rgba(180,198,255,0.16);
+  background: rgba(4, 8, 18, 0.45);
+}
+
+.iconBtn{
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r2);
+  border: 0px solid rgba(180,198,255,0.16);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  transition: transform .06s ease, background .12s ease, border-color .12s ease;
+}
+.iconBtn:hover{
+  background: rgba(255,255,255,0.09);
+  border-color: rgba(180,198,255,0.22);
+}
+.iconBtn:active{
+  transform: translateY(1px);
+}
+
+
+/* override global select,input styles for range */
+input.volSlider[type="range"]{
+  -webkit-appearance: none;
+  appearance: none;
+  height: 20px;          /* keeps it visually centered in 34px container */
+  padding: 0;
+  border: none;
+  background: transparent;
+  width: 160px;
+  --vol: 100%; /* default value */
+}
+input.volSlider[type="range"]::-webkit-slider-runnable-track{
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(235, 243, 255, 0.92) 0%,
+    rgba(235, 243, 255, 0.92) var(--vol),
+    rgba(180,198,255,0.16) var(--vol),
+    rgba(180,198,255,0.16) 100%
+  );
+  border: 1px solid rgba(180,198,255,0.14);
+}
+input.volSlider[type="range"]::-webkit-slider-thumb{
+  -webkit-appearance: none;
+  appearance: none;
+  margin-top: -6px; /* centers thumb on 6px track */
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(235, 243, 255, 0.92);
+  border: 1px solid rgba(180,198,255,0.22);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+}
+input.volSlider[type="range"]:focus{
+  outline: none;
+}
+input.volSlider[type="range"]::-moz-range-track{
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(235, 243, 255, 0.92) 0%,
+    rgba(235, 243, 255, 0.92) var(--vol),
+    rgba(180,198,255,0.16) var(--vol),
+    rgba(180,198,255,0.16) 100%
+  );
+  border: 1px solid rgba(180,198,255,0.14);
+}
+input.volSlider[type="range"]::-moz-range-thumb{
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(235, 243, 255, 0.92);
+  border: 1px solid rgba(180,198,255,0.22);
+  box-shadow: 0 6px 16px rgba(0,0,0,0.35);
+}
+
+.volVal{
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 46px;
+  text-align: right;
+}
  
 
 /* -------------------------
