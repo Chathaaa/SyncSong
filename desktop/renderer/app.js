@@ -47,6 +47,8 @@ let scrubWasPlaying = false;
 let spotifyPollIgnoreUntil = 0;
 let lastSpotifyUriLoaded = "";
 let hostIntentIsPlaying = true; // host's desired play state (source of truth for transitions)
+let suppressTransitionPauseOnce = false; // ✅ used for end-of-track auto advance
+
 
 
 // ---------- Unified music panel ----------
@@ -67,8 +69,7 @@ let playerVolume01 = (() => {
   const v = Number(localStorage.getItem(VOLUME_KEY));
   return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
 })();
-
-const isWeb = typeof window.api === "undefined";
+let lastNonZeroVolume01 = playerVolume01 > 0 ? playerVolume01 : 1;
 
 // UI helpers
 const el = (id) => document.getElementById(id);
@@ -499,14 +500,6 @@ async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
   renderNowPlaying();
 
   await syncClientToNowPlaying();
-
-  // ✅ NEW: after the new track is loaded, reassert the intended play state
-  if (nextIsPlaying) {
-    try {
-      if (playbackSource === "apple") {await applePlay()};
-      if (playbackSource === "spotify") await playerPlay();
-    } catch {}
-  }
 }
 
 async function playNextInSharedQueue() {
@@ -516,23 +509,15 @@ async function playNextInSharedQueue() {
 
   const wasPlaying = hostIntentIsPlaying;
 
-  // // ✅ 1) Duck first (prevents audible blip)
-  // try {
-  //   if (playbackSource === "spotify") {
-  //     const { spotifyDuckForTransition } = await import("./providers/spotify.js");
-  //     await spotifyDuckForTransition(500);
-  //   }
-  //   // if (playbackSource === "apple") {
-  //   //   const { appleDuckForTransition } = await import("./providers/apple.js");
-  //   //   await appleDuckForTransition(500);
-  //   // }
-  // } catch {}
-
-  // ✅ kill the “old song blip” BEFORE we change shared state
-  try {
-    if (playbackSource === "apple") await applePause();
-    if (playbackSource === "spotify") await playerPause();
-  } catch {}
+  // ✅ Manual next/prev may still pause. Auto-end should NOT pause (provider already ended+reset).
+  if (!suppressTransitionPauseOnce) {
+    try {
+      if (playbackSource === "apple") await applePause();
+      if (playbackSource === "spotify") await playerPause();
+    } catch {}
+  } else {
+    suppressTransitionPauseOnce = false; // one-shot
+  }
 
 
   if (!nowPlaying?.queueId) {
@@ -680,6 +665,7 @@ async function startSpotifyStateSync() {
 
       const dur = Number(s.duration || 0);
       const pos = Math.max(0, Math.min(Number(s.position || 0), dur || Infinity));
+    
       const paused = !!s.paused;
 
       nowPlaying = {
@@ -842,7 +828,7 @@ function startHostAutoAdvance() {
     try {
       let posMs = null;
       let durMs = Number(nowPlaying.track.durationMs);
-      const END_BUFFER_MS = playbackSource === "apple" ? 500 : 500;
+      const END_BUFFER_MS = playbackSource === "apple" ? 1000 : 1000;
 
       let providerIsPlaying = true; // default
       let ended = false;
@@ -894,10 +880,7 @@ function startHostAutoAdvance() {
         
         providerIsPlaying = !!a.isPlaying;
 
-        const nearEnd = durMs > 10_000 && posMs >= durMs - END_BUFFER_MS;
-
-        if (!providerIsPlaying && nearEnd) ended = true;
-
+        // ✅ Only advance once the provider has actually stopped and snapped back to ~0
         if (!providerIsPlaying &&
             posMs < 1000 &&
             durMs > 10_000 &&
@@ -909,10 +892,18 @@ function startHostAutoAdvance() {
       // If user paused mid-track, do nothing
       if (!ended) return;
 
+      
+
       autoAdvanceLock = true;
-      await advanceNextLikeButton();
+
+      // ✅ End-of-track: do NOT pause during transition; the provider is already stopped/reset
+      suppressTransitionPauseOnce = true;
+
       lastApplePosMs = 0;
       lastSpotifyPosMs = 0;
+      
+      await advanceNextLikeButton();
+
 
     } catch {
       // ignore transient polling failures
@@ -935,12 +926,6 @@ async function advanceNextLikeButton() {
 
   // IMPORTANT: capture intent before we pause for the transition
   const wasPlaying = hostIntentIsPlaying;
-
-  // optional: pause old track to reduce blip
-  try {
-    if (playbackSource === "apple") await applePause();
-    else if (playbackSource === "spotify") await playerPause();
-  } catch {}
 
   // advance shared queue; hostPlayQueueItem receives isPlaying via playNextInSharedQueue
   hostIntentIsPlaying = wasPlaying;
@@ -1299,27 +1284,64 @@ function wireUi() {
     try { await playerSetVolume(playerVolume01); } catch {}
   });
 
-  // Local volume slider (does not sync across users)
+   // -------------------------
+  // Local volume + mute (does not sync)
+  // -------------------------
   const vol = el("playerVolume");
   const volVal = el("playerVolumeVal");
+  const muteBtn = el("playerMute");
+  //const muteTip = el("playerMuteTip");
+
+  function setSliderFill() { if (vol) vol.style.setProperty("--vol", `${Math.round(playerVolume01 * 100)}%`); }
+
+  function setMuteIcon() {
+    if (!muteBtn) return;
+    // 🔇 when muted, 🔊 otherwise
+    muteBtn.textContent = playerVolume01 <= 0 ? "🔇" : "🔊";
+    const isMuted = playerVolume01 <= 0;
+    //if (muteTip) muteTip.setAttribute("data-tip", isMuted ? "Unmute" : "Mute");
+    muteBtn.setAttribute("aria-label", isMuted ? "Unmute" : "Mute");
+  }
+
+  async function applyVolume() {
+    try { await playerSetVolume(playerVolume01); } catch {}
+  }
+
   if (vol) {
     vol.value = String(Math.round(playerVolume01 * 100));
     if (volVal) volVal.textContent = `${Math.round(playerVolume01 * 100)}%`;
-
-    const apply = async () => {
-      try { await playerSetVolume(playerVolume01); } catch {}
-    };
+    setSliderFill();
+    setMuteIcon();
 
     vol.addEventListener("input", async () => {
       playerVolume01 = Math.max(0, Math.min(1, Number(vol.value) / 100));
+      if (playerVolume01 > 0) lastNonZeroVolume01 = playerVolume01;
       localStorage.setItem(VOLUME_KEY, String(playerVolume01));
       if (volVal) volVal.textContent = `${Math.round(playerVolume01 * 100)}%`;
-      await apply();
+      setSliderFill();
+      setMuteIcon();
+      await applyVolume();
     });
 
     // apply on boot
-    apply();
+    applyVolume();
   }
+
+  muteBtn?.addEventListener("click", async () => {
+    if (playerVolume01 > 0) {
+      lastNonZeroVolume01 = playerVolume01;
+      playerVolume01 = 0;
+    } else {
+      playerVolume01 = Math.max(0.05, lastNonZeroVolume01 || 1);
+    }
+    localStorage.setItem(VOLUME_KEY, String(playerVolume01));
+    if (vol) vol.value = String(Math.round(playerVolume01 * 100));
+    if (volVal) volVal.textContent = `${Math.round(playerVolume01 * 100)}%`;
+    setSliderFill();
+    setMuteIcon();
+    await applyVolume();
+  });
+
 
 
 }

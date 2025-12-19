@@ -6,6 +6,8 @@
 let wiredForInstance = null;
 let appleState = { isPlaying: false, positionMs: 0, durationMs: 0 };
 let appleWired = false;
+let applePlayInFlight = null;
+
 
 export const APPLE_DEV_TOKEN_URL = "https://syncsong-2lxp.onrender.com/apple/dev-token";
 
@@ -180,15 +182,39 @@ export async function applePlayTrack(track) {
   appleState.positionMs = 0;
   appleState.isPlaying = true;
 
-  // Replace queue with the new song (do NOT pause after setQueue)
+  // Best-effort: ensure playback is paused first to avoid a brief blip
+  try {
+    if (typeof mk.pause === "function") await mk.pause();
+  } catch {}
+
+  // Helper: wait for the next mediaItemDidChange event (fallback to timeout)
+  const waitForMediaItemChange = (timeoutMs = 800) => new Promise((resolve) => {
+    let done = false;
+    const handler = () => {
+      if (done) return;
+      done = true;
+      try { mk.removeEventListener("mediaItemDidChange", handler); } catch {}
+      resolve(true);
+    };
+    try { mk.addEventListener("mediaItemDidChange", handler); } catch {}
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { mk.removeEventListener("mediaItemDidChange", handler); } catch {}
+      resolve(false);
+    }, timeoutMs);
+  });
+
+  // Replace queue with the new song (wait briefly for the SDK to load the item)
   await mk.setQueue({ song: catalogId });
 
-  // Kick playback
-  await mk.play();
+  try {
+    // Wait for the SDK to report the new item (avoids playing the old item briefly)
+    //await waitForMediaItemChange(800);
+  } catch {}
 
-  setTimeout(() => {
-  const mk2 = window.MusicKit.getInstance();
-}, 800);
+  // Kick playback once the new item is available
+  await applePlay();
 
   // Immediately sample player values once (helps even if events are flaky)
   try {
@@ -207,9 +233,24 @@ export async function applePause() {
 }
 
 export async function applePlay() {
-  const mk = await appleEnsureAuthorized();
-  // ✅ In v3, mk.player may not exist; just play best-effort
-  await mk.play();
+  if (applePlayInFlight) return applePlayInFlight;
+
+  applePlayInFlight = (async () => {
+    const mk = await appleEnsureAuthorized();
+
+    const PLAYING = window.MusicKit?.PlaybackStates?.playing ?? 2;
+    try {
+      if (mk?.playbackState === PLAYING) return;
+    } catch {}
+
+    await mk.play();
+  })();
+
+  try {
+    return await applePlayInFlight;
+  } finally {
+    applePlayInFlight = null;
+  }
 }
 
 export async function appleNext() {
