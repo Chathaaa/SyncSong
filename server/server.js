@@ -139,6 +139,7 @@ function state(sessionId, session) {
     type: "session:state",
     sessionId,
     hostUserId: session.hostUserId,
+    allowGuestControl: !!session.allowGuestControl,
     members: Array.from(session.members.entries()).map(([userId, m]) => ({
       userId,
       displayName: m.displayName,
@@ -172,6 +173,7 @@ wss.on("connection", (ws) => {
 
       const session = {
         hostUserId: userId,
+        allowGuestControl: false,
         members: new Map(),
         queue: [],
         nowPlaying: null,
@@ -203,6 +205,22 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (type === "session:setGuestControl") {
+      const sessionId = joinedSessionId || String(payload?.sessionId || "").trim().toUpperCase();
+      const session = sessions.get(sessionId);
+      if (!session) {
+        safeSend(ws, { type: "error", message: "Not in a valid session" });
+        return;
+      }
+      if (userId !== session.hostUserId) {
+        safeSend(ws, { type: "error", message: "Only host can change permissions" });
+        return;
+      }
+      session.allowGuestControl = !!payload?.allowGuestControl;
+      broadcast(session, state(sessionId, session));
+      return;
+    }
+
     // From here: require a session
     const sessionId = joinedSessionId || String(payload?.sessionId || "").trim().toUpperCase();
     const session = sessions.get(sessionId);
@@ -210,6 +228,8 @@ wss.on("connection", (ws) => {
       safeSend(ws, { type: "error", message: "Not in a valid session" });
       return;
     }
+
+    const canControl = (userId === session.hostUserId) || !!session.allowGuestControl;
 
     if (type === "queue:add") {
       const t = payload?.track;
@@ -267,8 +287,8 @@ wss.on("connection", (ws) => {
     }
 
     if (type === "queue:remove") {
-      if (userId !== session.hostUserId) {
-        safeSend(ws, { type: "error", message: "Only host can remove" });
+      if (!canControl) {
+        safeSend(ws, { type: "error", message: "Only host can remove (or host must enable guest controls)" });
         return;
       }
       const queueId = payload?.queueId;
@@ -282,8 +302,8 @@ wss.on("connection", (ws) => {
 
 
     if (type === "queue:reorder") {
-      if (userId !== session.hostUserId) {
-        safeSend(ws, { type: "error", message: "Only host can reorder" });
+      if (!canControl) {
+        safeSend(ws, { type: "error", message: "Only host can reorder (or host must enable guest controls)" });
         return;
       }
 
@@ -317,7 +337,7 @@ wss.on("connection", (ws) => {
 
 
     if (type === "host:state") {
-      if (userId !== session.hostUserId) return;
+      if (!canControl) return;
       session.nowPlaying = payload?.nowPlaying || null;
       broadcast(session, { type: "nowPlaying:updated", nowPlaying: session.nowPlaying });
       return;
@@ -329,8 +349,8 @@ wss.on("connection", (ws) => {
       type === "host:resume" ||
       type === "host:next"
     ) {
-      if (userId !== session.hostUserId) {
-        safeSend(ws, { type: "error", message: "Only host can control playback" });
+      if (!canControl) {
+        safeSend(ws, { type: "error", message: "Only host can control playback (or host must enable guest controls)" });
         return;
       }
       broadcast(session, { type, payload });
