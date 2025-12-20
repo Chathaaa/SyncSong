@@ -342,6 +342,31 @@ button:disabled{ opacity: .42; cursor: not-allowed; }
   flex-wrap: wrap;
 }
 
+.queueItemHost {
+  cursor: grab;
+}
+.queueItemHost:active {
+  cursor: grabbing;
+}
+.dragHandle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 10px;
+  border: 1px solid rgba(180,198,255,0.14);
+  background: rgba(255,255,255,0.05);
+  color: var(--muted2);
+  user-select: none;
+}
+.queueDragOver {
+  outline: 2px dashed rgba(180,198,255,0.30);
+  outline-offset: 2px;
+}
+.queueDragging {
+  opacity: 0.65;
+}
 
 
 /* Tooltip wrapper */
