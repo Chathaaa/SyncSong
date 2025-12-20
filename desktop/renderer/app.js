@@ -23,6 +23,7 @@ let lastRejoinAttempt = "";
 
 let queue = [];
 let nowPlaying = null;
+let allowGuestControl = false;
 
 // unified music panel state
 let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "itunes" | "spotify | "apple"
@@ -238,6 +239,23 @@ function renderRejoinButton() {
   btn.textContent = `Rejoin ${last}`;
 }
 
+function canControlPlayback() {
+  return !!(userId && hostUserId && (userId === hostUserId || allowGuestControl));
+}
+
+function renderGuestControlToggle() {
+  const btn = el("toggleGuestControl");
+  if (!btn) return;
+  const isHost = userId && hostUserId && userId === hostUserId;
+  if (!sessionId || !isHost) {
+    btn.style.display = "none";
+    return;
+  }
+  btn.style.display = "inline-block";
+  btn.textContent = `Guest controls: ${allowGuestControl ? "On" : "Off"}`;
+}
+
+
 // ---------- Session meta ----------
 function renderSessionMeta() {
   const isHost = userId && hostUserId && userId === hostUserId;
@@ -270,6 +288,7 @@ function renderSessionMeta() {
   renderShareButton();
   renderRejoinButton();
   updatePeopleMeta();
+  renderGuestControlToggle();
   // If we're in a session, the auto-room hint is no longer relevant
   if (sessionId) el("autoRoomHint") && (el("autoRoomHint").style.display = "none");
 }
@@ -350,6 +369,7 @@ function connectWS() {
       localStorage.setItem(LAST_SESSION_KEY, sessionId);
       localStorage.setItem(LAST_SESSION_AT_KEY, String(Date.now()));
       hostUserId = msg.hostUserId;
+      allowGuestControl = !!msg.allowGuestControl;
       queue = msg.queue || [];
       updatePeopleMeta();
       nowPlaying = msg.nowPlaying || null;
@@ -627,6 +647,7 @@ function renderQueue() {
 
   box.innerHTML = "";
   const isHost = userId && hostUserId && userId === hostUserId;
+  const canControl = canControlPlayback();
 
   queue.forEach((q) => {
     const t = q.track;
@@ -642,13 +663,13 @@ function renderQueue() {
         </div>
           </div>
       <div class="actions">
-        ${isHost ? `<span class="dragHandle" title="Drag to reorder" aria-label="Drag to reorder">☰</span>` : ``}
-        ${isHost ? `<button data-play="${q.queueId}">Play</button>` : ``}
-        ${isHost ? `<button data-remove="${q.queueId}">Remove</button>` : ``}
+        ${canControl ? `<span class="dragHandle" title="Drag to reorder" aria-label="Drag to reorder">☰</span>` : ``}
+        ${canControl ? `<button data-play="${q.queueId}">Play</button>` : ``}
+        ${canControl ? `<button data-remove="${q.queueId}">Remove</button>` : ``}
       </div>
     `;
 
-    if (isHost) {
+    if (canControl) {
       row.querySelector("[data-play]").addEventListener("click", () => hostPlayQueueItem(q));
       row.querySelector("[data-remove]").addEventListener("click", () =>
         send("queue:remove", { sessionId, queueId: q.queueId })
@@ -939,7 +960,7 @@ async function startAppleStateSync() {
 
       const { appleGetPlaybackState } = await import("./providers/apple.js");
       const a = await appleGetPlaybackState();
-      //console.log("[apple poll]", a);
+
       if (!a) return;
 
       // Keep UI driven by the *real* player clock
@@ -984,7 +1005,6 @@ function renderNowPlaying() {
     titleEl.textContent = "Not playing";
     if (subEl) subEl.textContent = "";
     if (artEl) {
-      console.log("No art")
       artEl.src = "";
       artEl.style.display = "none";
     }
@@ -1249,6 +1269,15 @@ function wireUi() {
     await leaveSession();
   });
 
+  el("toggleGuestControl")?.addEventListener("click", () => {
+    const isHost = userId && hostUserId && userId === hostUserId;
+    if (!isHost || !sessionId) return;
+    send("session:setGuestControl", {
+      sessionId,
+      allowGuestControl: !allowGuestControl,
+    });
+  });
+
   el("rejoinLast")?.addEventListener("click", () => {
     const code = (localStorage.getItem(LAST_SESSION_KEY) || "").trim().toUpperCase();
     if (!code) return;
@@ -1280,13 +1309,14 @@ function wireUi() {
 
   // Loop toggle
   el("toggleLoop")?.addEventListener("click", () => {
+    if (!canControlPlayback()) return;
     loopQueue = !loopQueue;
     renderLoopToggle();
   });
 
   // Host controls
   el("npPlayPause")?.addEventListener("click", async () => {
-    if (!isHostNow()) return;
+    if (!canControlPlayback()) return;
 
 
     if (!nowPlaying?.queueId && queue.length) {
@@ -1328,7 +1358,7 @@ function wireUi() {
 
 
   el("npNext")?.addEventListener("click", async () => {
-    if (!isHostNow()) return;
+    if (!canControlPlayback()) return;
 
     // keep intent in sync with UI state
     hostIntentIsPlaying = !!nowPlaying?.isPlaying;
@@ -1338,7 +1368,7 @@ function wireUi() {
   });
 
   el("npPrev")?.addEventListener("click", async () => {
-    if (!isHostNow()) return;
+    if (!canControlPlayback()) return;
 
     const wasPlaying = hostIntentIsPlaying;
     await playerPrev();
@@ -1408,7 +1438,7 @@ function wireUi() {
     // };
 
     prog.addEventListener("mousedown", async (e) => {
-      if (!isHostNow() || !nowPlaying) return;
+      if (!canControlPlayback() || !nowPlaying) return;
 
       isScrubbing = true;
       scrubWasPlaying = !!nowPlaying.isPlaying;
@@ -1433,7 +1463,7 @@ function wireUi() {
       if (!dragging) return;
       dragging = false;
 
-      if (!isHostNow() || !nowPlaying) { isScrubbing = false; return; }
+      if (!canControlPlayback() || !nowPlaying) { isScrubbing = false; return; }
 
       const pct = pctFromEvent(e);
       const dur = nowPlaying.track?.durationMs || 0;
@@ -1482,8 +1512,6 @@ function wireUi() {
       "spotify:expires_at",
       String(Date.now() + (tok.expires_in || 0) * 1000)
     );
-
-    //console.log("[spotify] token received via postMessage");
   });
 
 
