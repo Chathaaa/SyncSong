@@ -653,7 +653,7 @@ function renderQueue() {
     const t = q.track;
     const row = document.createElement("div");
     row.className = "item";
-    if (isHost) row.classList.add("queueItemHost");
+    if (canControl) row.classList.add("queueItemHost");
     row.innerHTML = `
       <div class="trackLeft">
         <img class="trackArt" src="${escapeHtml(t.artworkUrl || "")}" alt="" loading="lazy" />
@@ -676,49 +676,50 @@ function renderQueue() {
       );
     }
 
-    // Drag reorder (host-only)
-    row.draggable = true;
-    row.dataset.qid = q.queueId;
+    if (canControl) {
+      // Drag reorder (controller-only)
+      row.draggable = true;
+      row.dataset.qid = q.queueId;
 
-    row.addEventListener("dragstart", (e) => {
-      dragQueueId = q.queueId;
-      row.classList.add("queueDragging");
-      try { e.dataTransfer.effectAllowed = "move"; } catch {}
-    });
+      row.addEventListener("dragstart", (e) => {
+        dragQueueId = q.queueId;
+        row.classList.add("queueDragging");
+        try { e.dataTransfer.effectAllowed = "move"; } catch {}
+      });
 
-    row.addEventListener("dragend", () => {
-      dragQueueId = null;
-      row.classList.remove("queueDragging");
-      // clear any drag-over styling
-      document.querySelectorAll(".queueDragOver").forEach(n => n.classList.remove("queueDragOver"));
-    });
+      row.addEventListener("dragend", () => {
+        dragQueueId = null;
+        row.classList.remove("queueDragging");
+        document.querySelectorAll(".queueDragOver").forEach(n => n.classList.remove("queueDragOver"));
+      });
 
-    row.addEventListener("dragover", (e) => {
-      e.preventDefault(); // allow drop
-      row.classList.add("queueDragOver");
-      try { e.dataTransfer.dropEffect = "move"; } catch {}
-    });
+      row.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        row.classList.add("queueDragOver");
+        try { e.dataTransfer.dropEffect = "move"; } catch {}
+      });
 
-    row.addEventListener("dragleave", () => {
-      row.classList.remove("queueDragOver");
-    });
+      row.addEventListener("dragleave", () => {
+        row.classList.remove("queueDragOver");
+      });
 
-    row.addEventListener("drop", (e) => {
-      e.preventDefault();
-      row.classList.remove("queueDragOver");
-      const fromId = dragQueueId;
-      const toId = row.dataset.qid;
-      if (!fromId || !toId || fromId === toId) return;
+      row.addEventListener("drop", (e) => {
+        e.preventDefault();
+        row.classList.remove("queueDragOver");
+        const fromId = dragQueueId;
+        const toId = row.dataset.qid;
+        if (!fromId || !toId || fromId === toId) return;
 
-      const fromIdx = queue.findIndex(x => x.queueId === fromId);
-      const toIdx = queue.findIndex(x => x.queueId === toId);
-      if (fromIdx < 0 || toIdx < 0) return;
+        const fromIdx = queue.findIndex(x => x.queueId === fromId);
+        const toIdx = queue.findIndex(x => x.queueId === toId);
+        if (fromIdx < 0 || toIdx < 0) return;
 
-      const next = queue.slice();
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      applyAndSendQueueOrder(next);
-    });
+        const next = queue.slice();
+        const [moved] = next.splice(fromIdx, 1);
+        next.splice(toIdx, 0, moved);
+        applyAndSendQueueOrder(next);
+      });
+    }
 
 
 
@@ -734,7 +735,7 @@ function renderQueue() {
 
 async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
   const isHost = userId && hostUserId && userId === hostUserId;
-  if (!isHost) return;
+  if (!canControlPlayback()) return;
 
   autoAdvanceLock = false;
 
@@ -760,7 +761,7 @@ async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
 
 async function playNextInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
-  if (!isHost) return;
+  if (!canControlPlayback()) return;
   if (!queue.length) return;
 
   const wasPlaying = hostIntentIsPlaying;
@@ -801,7 +802,7 @@ async function playNextInSharedQueue() {
 
 async function playPrevInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
-  if (!isHost) return;
+  if (!canControlPlayback()) return;
   if (!queue.length) return;
 
   try {
@@ -856,7 +857,15 @@ async function syncClientToNowPlaying() {
 
   // If same track already loaded, just resume (don't restart)
   if (loadKey === lastLoadedQueueKey) {
-    try { await playerPlay(); } catch {}
+      try {
+        if (playbackSource === "apple") {
+        await applePlay();
+        startAppleStateSync();
+      } else if (playbackSource === "spotify") {
+        await playerPlay();
+        startSpotifyStateSync();
+      }
+    } catch {}
     return;
   }
 
@@ -966,7 +975,7 @@ async function startAppleStateSync() {
       // Keep UI driven by the *real* player clock
       nowPlaying = {
         ...nowPlaying,
-        //isPlaying: !!a.isPlaying,
+        isPlaying: !!a.isPlaying,
         playheadMs: Number(a.positionMs),
         // NOTE: no startedAt updates here (you wanted to remove manual timestamping)
       };
