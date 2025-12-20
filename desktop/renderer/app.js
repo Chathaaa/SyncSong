@@ -19,6 +19,7 @@ let ws;
 let userId = null;
 let sessionId = null;
 let hostUserId = null;
+let lastRejoinAttempt = "";
 
 let queue = [];
 let nowPlaying = null;
@@ -48,7 +49,7 @@ let spotifyPollIgnoreUntil = 0;
 let lastSpotifyUriLoaded = "";
 let hostIntentIsPlaying = true; // host's desired play state (source of truth for transitions)
 let suppressTransitionPauseOnce = false; // ✅ used for end-of-track auto advance
-
+let dragQueueId = null;
 
 
 // ---------- Unified music panel ----------
@@ -373,8 +374,24 @@ function connectWS() {
       return;
     }
 
+
     if (msg.type === "error") {
-      el("sessionMeta").textContent = `Error: ${msg.message}`;
+      const message = String(msg.message || "");
+
+      // If the user clicked "Rejoin" but the room is gone, stop showing the button.
+      if (!sessionId && lastRejoinAttempt && /session not found/i.test(message)) {
+        const stored = (localStorage.getItem(LAST_SESSION_KEY) || "").trim().toUpperCase();
+        if (stored === lastRejoinAttempt) {
+          localStorage.removeItem(LAST_SESSION_KEY);
+          localStorage.removeItem(LAST_SESSION_AT_KEY);
+          lastRejoinAttempt = "";
+          renderRejoinButton();
+          el("sessionMeta").textContent = "That room has ended.";
+          return;
+        }
+      }
+
+      el("sessionMeta").textContent = `Error: ${message}`;
     }
   };
 
@@ -591,6 +608,19 @@ function addToQueue(track) {
   send("queue:add", { sessionId, track });
 }
 
+function capitalizeFirstLetter(val) {
+    return String(val).charAt(0).toUpperCase() + String(val).slice(1);
+}
+
+function applyAndSendQueueOrder(newQueue) {
+  if (!sessionId) return;
+  queue = newQueue;
+  updatePeopleMeta?.();
+  renderQueue();
+  // Send only the order of queueIds (server should reorder its queue)
+  send("queue:reorder", { sessionId, order: queue.map(q => q.queueId) });
+}
+
 function renderQueue() {
   const box = el("queue");
   if (!box) return;
@@ -602,12 +632,17 @@ function renderQueue() {
     const t = q.track;
     const row = document.createElement("div");
     row.className = "item";
+    if (isHost) row.classList.add("queueItemHost");
     row.innerHTML = `
-      <div class="left">
-        <div class="title">${escapeHtml(t.title)}</div>
-        <div class="meta">${escapeHtml(t.artist)} • added by ${escapeHtml(q.addedBy?.displayName || "someone")} • ${escapeHtml(t.source || "")}</div>
-      </div>
+      <div class="trackLeft">
+        <img class="trackArt" src="${escapeHtml(t.artworkUrl || "")}" alt="" loading="lazy" />
+        <div class="trackText">
+          <div class="title">${escapeHtml(t.title)}</div>
+          <div class="meta">${escapeHtml(t.artist)} •  ${escapeHtml(t.album || "")} • added by ${escapeHtml(q.addedBy?.displayName || "someone")} from ${escapeHtml(capitalizeFirstLetter(t.source) || "")}</div>
+        </div>
+          </div>
       <div class="actions">
+        ${isHost ? `<span class="dragHandle" title="Drag to reorder" aria-label="Drag to reorder">☰</span>` : ``}
         ${isHost ? `<button data-play="${q.queueId}">Play</button>` : ``}
         ${isHost ? `<button data-remove="${q.queueId}">Remove</button>` : ``}
       </div>
@@ -618,6 +653,58 @@ function renderQueue() {
       row.querySelector("[data-remove]").addEventListener("click", () =>
         send("queue:remove", { sessionId, queueId: q.queueId })
       );
+    }
+
+    // Drag reorder (host-only)
+    row.draggable = true;
+    row.dataset.qid = q.queueId;
+
+    row.addEventListener("dragstart", (e) => {
+      dragQueueId = q.queueId;
+      row.classList.add("queueDragging");
+      try { e.dataTransfer.effectAllowed = "move"; } catch {}
+    });
+
+    row.addEventListener("dragend", () => {
+      dragQueueId = null;
+      row.classList.remove("queueDragging");
+      // clear any drag-over styling
+      document.querySelectorAll(".queueDragOver").forEach(n => n.classList.remove("queueDragOver"));
+    });
+
+    row.addEventListener("dragover", (e) => {
+      e.preventDefault(); // allow drop
+      row.classList.add("queueDragOver");
+      try { e.dataTransfer.dropEffect = "move"; } catch {}
+    });
+
+    row.addEventListener("dragleave", () => {
+      row.classList.remove("queueDragOver");
+    });
+
+    row.addEventListener("drop", (e) => {
+      e.preventDefault();
+      row.classList.remove("queueDragOver");
+      const fromId = dragQueueId;
+      const toId = row.dataset.qid;
+      if (!fromId || !toId || fromId === toId) return;
+
+      const fromIdx = queue.findIndex(x => x.queueId === fromId);
+      const toIdx = queue.findIndex(x => x.queueId === toId);
+      if (fromIdx < 0 || toIdx < 0) return;
+
+      const next = queue.slice();
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      applyAndSendQueueOrder(next);
+    });
+
+
+
+    const img = row.querySelector(".trackArt");
+    if (img) {
+      img.onerror = () => { img.style.display = "none"; };
+      if (!t.artworkUrl) img.style.display = "none";
     }
 
     box.appendChild(row);
@@ -897,6 +984,7 @@ function renderNowPlaying() {
     titleEl.textContent = "Not playing";
     if (subEl) subEl.textContent = "";
     if (artEl) {
+      console.log("No art")
       artEl.src = "";
       artEl.style.display = "none";
     }
@@ -914,8 +1002,9 @@ function renderNowPlaying() {
   if (posEl) posEl.textContent = fmtMs(playhead);
   if (durEl) durEl.textContent = fmtMs(t.durationMs || 0);
   if (artEl) {
+
     artEl.src = t.artworkUrl || "";
-    artEl.style.display = t.artworkUrl ? "block" : "none";
+    artEl.style.display = t.artworkUrl ? "block" : "none";  
   }
 
   titleEl.textContent = t.title || "Unknown title";
@@ -1164,6 +1253,7 @@ function wireUi() {
     const code = (localStorage.getItem(LAST_SESSION_KEY) || "").trim().toUpperCase();
     if (!code) return;
     const displayName = getDisplayName("Guest");
+    lastRejoinAttempt = code;
     send("session:join", { sessionId: code, displayName });
   });
 
@@ -1393,7 +1483,7 @@ function wireUi() {
       String(Date.now() + (tok.expires_in || 0) * 1000)
     );
 
-    console.log("[spotify] token received via postMessage");
+    //console.log("[spotify] token received via postMessage");
   });
 
 

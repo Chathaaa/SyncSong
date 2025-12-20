@@ -146,7 +146,7 @@ export async function spotifyTransferToThisAppDevice() {
 
 // The Spotify Web Playback SDK will call this when it loads on the page
 window.onSpotifyWebPlaybackSDKReady = () => {
-  console.log("[spotify] Web Playback SDK ready");
+  // console.log("[spotify] Web Playback SDK ready");
 };
 
 function waitForDeviceId({ timeoutMs = 15000 } = {}) {
@@ -190,14 +190,14 @@ export async function ensureSpotifyWebPlayer() {
   deviceReadyPromise = deviceReadyPromise || new Promise((resolve) => {
     spotifyPlayer.addListener("ready", async ({ device_id }) => {
       spotifyDeviceId = device_id;
-      console.log("[spotify] ready device_id=", device_id);
+      //console.log("[spotify] ready device_id=", device_id);
       try { await spotifyTransferToThisAppDevice(); } catch (e) { console.warn("[spotify] transfer failed:", e); }
       resolve(device_id);
     });
   });
 
   spotifyPlayer.addListener("not_ready", ({ device_id }) => {
-    console.log("[spotify] device offline", device_id);
+    //console.log("[spotify] device offline", device_id);
     if (spotifyDeviceId === device_id) spotifyDeviceId = null;
   });
 

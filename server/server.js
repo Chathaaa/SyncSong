@@ -280,6 +280,42 @@ wss.on("connection", (ws) => {
       return;
     }
 
+
+    if (type === "queue:reorder") {
+      if (userId !== session.hostUserId) {
+        safeSend(ws, { type: "error", message: "Only host can reorder" });
+        return;
+      }
+
+      const order = payload?.order;
+      if (!Array.isArray(order) || order.length === 0) {
+        safeSend(ws, { type: "error", message: "Invalid reorder payload" });
+        return;
+      }
+
+      const byId = new Map(session.queue.map((q) => [q.queueId, q]));
+      const next = [];
+
+      // Build queue in requested order (ignore unknown ids)
+      for (const id of order) {
+        const item = byId.get(id);
+        if (item) next.push(item);
+      }
+
+      // Append anything missing (safety)
+      if (next.length !== session.queue.length) {
+        const seen = new Set(order);
+        for (const q of session.queue) {
+          if (!seen.has(q.queueId)) next.push(q);
+        }
+      }
+
+      session.queue = next;
+      broadcast(session, { type: "queue:updated", queue: session.queue });
+      return;
+    }
+
+
     if (type === "host:state") {
       if (userId !== session.hostUserId) return;
       session.nowPlaying = payload?.nowPlaying || null;
