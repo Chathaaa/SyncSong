@@ -46,7 +46,15 @@ let lastAutoAdvanceSource = "";
 let localActiveQueueId = "";
 let isScrubbing = false;
 let scrubWasPlaying = false;
+
 let spotifyPollIgnoreUntil = 0;
+// --- Sync/race guards ---
+let transitionIgnoreUntil = 0;   // prevent pollers from mutating nowPlaying during track switches
+let remoteSeekIgnoreUntil = 0;   // prevent pollers from snapping UI back immediately after we apply a remote seek
+
+const inTransition = () => Date.now() < transitionIgnoreUntil;
+const ignoreForMs = (ms) => { transitionIgnoreUntil = Math.max(transitionIgnoreUntil, Date.now() + ms); };
+
 let lastSpotifyUriLoaded = "";
 let hostIntentIsPlaying = true; // host's desired play state (source of truth for transitions)
 let suppressTransitionPauseOnce = false; // ✅ used for end-of-track auto advance
@@ -388,7 +396,16 @@ function connectWS() {
     }
 
     if (msg.type === "nowPlaying:updated") {
+      const prev = nowPlaying;
       nowPlaying = msg.nowPlaying || null;
+
+      // ✅ NEW: if playhead jumped, give the client a short window to apply the seek
+      const prevMs = Number(prev?.playheadMs || 0);
+      const nextMs = Number(nowPlaying?.playheadMs || 0);
+      if (Math.abs(nextMs - prevMs) > 1500) {
+        remoteSeekIgnoreUntil = Date.now() + 900;
+      }
+
       renderNowPlaying();
       syncClientToNowPlaying();
       return;
@@ -436,8 +453,9 @@ function renderConnectButtons() {
   const ap = el("connectApple");
   const box = el("connectPrompt")
 
-  if (sp) sp.style.display = (hasSpotifyAuth() || box) ? "none" : "inline-block";
-  if (ap) ap.style.display = (hasAppleAuth() || box) ? "none" : "inline-block";
+  const promptVisible = box && box.style.display !== "none";
+  if (sp) sp.style.display = (hasSpotifyAuth() || promptVisible) ? "none" : "inline-block";
+  if (ap) ap.style.display = (hasAppleAuth() || promptVisible) ? "none" : "inline-block";
 }
 
 function renderMusicTabs() {
@@ -760,7 +778,7 @@ function renderQueue() {
 
 async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
   const isHost = userId && hostUserId && userId === hostUserId;
-  if (!canControlPlayback()) return;
+  if (!isHost) return;
 
   autoAdvanceLock = false;
 
@@ -788,6 +806,11 @@ async function playNextInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
   if (!canControlPlayback()) return;
   if (!queue.length) return;
+
+  // prevent pollers from fighting the transition
+  ignoreForMs(1500);
+  stopSpotifyStateSync();
+  stopAppleStateSync();
 
   const wasPlaying = hostIntentIsPlaying;
 
@@ -829,6 +852,10 @@ async function playPrevInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
   if (!canControlPlayback()) return;
   if (!queue.length) return;
+
+  ignoreForMs(1500);
+  stopSpotifyStateSync();
+  stopAppleStateSync();
 
   try {
     if (playbackSource === "spotify") await playerPause();
@@ -880,10 +907,32 @@ async function syncClientToNowPlaying() {
     return;
   }
 
-  // If same track already loaded, just resume (don't restart)
+  const targetMs = Number(nowPlaying.playheadMs || 0);
+
+  // helper: only seek when it’s meaningful, and don’t fight the user while scrubbing
+  const maybeSeekToTarget = async () => {
+    if (!targetMs || isScrubbing) return;
+
+    const localMs =
+      playbackSource === "spotify" ? Number(lastSpotifyPosMs || 0)
+      : playbackSource === "apple" ? Number(lastApplePosMs || 0)
+      : 0;
+
+    const drift = Math.abs(localMs - targetMs);
+
+    // Only correct meaningful drift so we don't constantly micro-adjust
+    if (drift <= 1200) return;
+
+    try {
+      // ✅ give the seek a moment to apply before pollers snap UI back
+      remoteSeekIgnoreUntil = Date.now() + 900;
+      await playerSeek(targetMs / 1000);
+    } catch {}
+  };
+
   if (loadKey === lastLoadedQueueKey) {
-      try {
-        if (playbackSource === "apple") {
+    try {
+      if (playbackSource === "apple") {
         await applePlay();
         startAppleStateSync();
       } else if (playbackSource === "spotify") {
@@ -891,12 +940,12 @@ async function syncClientToNowPlaying() {
         startSpotifyStateSync();
       }
     } catch {}
+    await maybeSeekToTarget();          // ✅ apply seek on guests too
     return;
   }
 
-  // New track: load/open it once
   lastLoadedQueueKey = loadKey;
-  localActiveQueueId = nowPlaying.queueId; // ✅ mark what we expect locally
+  localActiveQueueId = nowPlaying.queueId;
 
   try {
     await stopAllLocalPlayback();
@@ -905,7 +954,10 @@ async function syncClientToNowPlaying() {
     el("sessionMeta").textContent =
       `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
   }
+
+  await maybeSeekToTarget();            // ✅ apply seek after load
 }
+
 
 async function stopAllLocalPlayback() {
   // stop Spotify polling if we leave spotify
@@ -935,6 +987,9 @@ async function startSpotifyStateSync() {
 
   spotifyStateTimer = setInterval(async () => {
     try {
+      if (inTransition()) return;
+      if (Date.now() < remoteSeekIgnoreUntil) return;
+
       const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
       const s = await spotifyGetPlaybackState();
       const currentUri = s?.track_window?.current_track?.uri || "";
@@ -955,7 +1010,7 @@ async function startSpotifyStateSync() {
 
       const dur = Number(s.duration || 0);
       const pos = Math.max(0, Math.min(Number(s.position || 0), dur || Infinity));
-    
+      lastSpotifyPosMs = pos;
       const paused = !!s.paused;
 
       nowPlaying = {
@@ -991,11 +1046,15 @@ async function startAppleStateSync() {
       if (!nowPlaying?.track) return;
       if (isScrubbing) return;
       if (nowPlaying.queueId !== localActiveQueueId) return; // ✅ prevents mismatched UI
+      if (inTransition()) return;
+      if (Date.now() < remoteSeekIgnoreUntil) return;
 
       const { appleGetPlaybackState } = await import("./providers/apple.js");
       const a = await appleGetPlaybackState();
 
       if (!a) return;
+
+      lastApplePosMs = Number(a.positionMs) || 0;
 
       // Keep UI driven by the *real* player clock
       nowPlaying = {
