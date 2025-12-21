@@ -998,13 +998,6 @@ async function syncClientToNowPlaying() {
   try {
     await stopAllLocalPlayback();
     await playTrackOnMySource(nowPlaying.track);
-    // ✅ Reassert play state after switching tracks (host shouldn't end up paused)
-    if (nowPlaying?.isPlaying) {
-      try {
-        if (playbackSource === "apple") await applePlay();
-        else if (playbackSource === "spotify") await playerPlay();
-      } catch {}
-    }
   } catch (e) {
     el("sessionMeta").textContent =
       `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;

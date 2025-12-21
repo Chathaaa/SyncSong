@@ -225,6 +225,10 @@ export async function applePlayTrack(track) {
     }, timeoutMs);
   });
 
+  // Stop/pause first to avoid the "play without pause/stop" error during transitions
+  try { await mk.pause(); } catch {}
+  try { if (typeof mk.stop === "function") await mk.stop(); } catch {}
+
   // Replace queue with the new song (wait briefly for the SDK to load the item)
   await mk.setQueue({ song: catalogId });
 
@@ -258,12 +262,29 @@ export async function applePlay() {
   applePlayInFlight = (async () => {
     const mk = await appleEnsureAuthorized();
 
+    // MusicKit states can be flaky; check a few places
     const PLAYING = window.MusicKit?.PlaybackStates?.playing ?? 2;
-    try {
-      if (mk?.playbackState === PLAYING) return;
-    } catch {}
+    const state = (mk?.playbackState ?? mk?.player?.playbackState);
 
-    await mk.play();
+    // If already playing, don't call play() again.
+    if (state === PLAYING) return;
+
+    try {
+      await mk.play();
+    } catch (e) {
+      const msg = String(e?.message || e || "");
+
+      // This is the exact error you're seeing.
+      if (msg.includes("play() method was called without a previous stop() or pause()")) {
+        // Force MusicKit into a "legal" state then retry.
+        try { await mk.pause(); } catch {}
+        try { if (typeof mk.stop === "function") await mk.stop(); } catch {}
+        await mk.play();
+        return;
+      }
+
+      throw e;
+    }
   })();
 
   try {
