@@ -43,6 +43,8 @@ let lastApplePosMs = 0;
 let lastSpotifyPosMs = 0;
 let lastAutoAdvanceQueueId = "";
 let lastAutoAdvanceSource = "";
+let lastHostPlayheadSentAt = 0;
+let lastHostPlayheadSentMs = -1;
 let localActiveQueueId = "";
 let isScrubbing = false;
 let scrubWasPlaying = false;
@@ -57,7 +59,6 @@ const ignoreForMs = (ms) => { transitionIgnoreUntil = Math.max(transitionIgnoreU
 
 let lastSpotifyUriLoaded = "";
 let hostIntentIsPlaying = true; // host's desired play state (source of truth for transitions)
-let suppressTransitionPauseOnce = false; // ✅ used for end-of-track auto advance
 let dragQueueId = null;
 
 
@@ -135,7 +136,6 @@ function setScrubbing(on) {
   document.body.classList.toggle("scrubbing", on);
   el("npProgress")?.classList.toggle("scrubbing", on);
 }
-
 
 // ---------- Clipboard / Share ----------
 async function copyTextToClipboard(text) {
@@ -379,11 +379,20 @@ function connectWS() {
       hostUserId = msg.hostUserId;
       allowGuestControl = !!msg.allowGuestControl;
       queue = msg.queue || [];
-      updatePeopleMeta();
       nowPlaying = msg.nowPlaying || null;
+
+      updatePeopleMeta();
       renderSessionMeta();
       renderQueue();
       renderNowPlaying();
+
+      // ✅ IMPORTANT: guest join sync guard
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost && nowPlaying?.playheadMs > 0) {
+        // give the seek time to apply before pollers fight it
+        remoteSeekIgnoreUntil = Date.now() + 1200;
+      }
+
       syncClientToNowPlaying();
       return;
     }
@@ -525,9 +534,6 @@ function renderMusicTabs() {
   //el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
   el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
   el("sourceApple")?.classList.toggle("active", musicSource === "apple");
-
-  el("connectSpotify").style.display = (musicSource === "spotify") ? "inline-block" : "none";
-  el("connectApple").style.display = (musicSource === "apple") ? "inline-block" : "none";
 
   renderConnectButtons();
 
@@ -693,11 +699,11 @@ async function reloadMusic() {
   return loadApplePlaylistsAndTracks();
 }
 
-function setSource(next) {
+async function setSource(next) {
   musicSource = next;
   localStorage.setItem(LAST_SOURCE_KEY, musicSource);
   renderMusicTabs();
-  reloadMusic();
+  await reloadMusic();
 }
 
 // ---------- Queue + playback ----------
@@ -1068,6 +1074,7 @@ async function startSpotifyStateSync() {
       };
 
       renderNowPlaying();
+      maybeBroadcastHostPlayhead();
     } catch {}
   }, 500);
 }
@@ -1113,10 +1120,40 @@ async function startAppleStateSync() {
       };
 
       renderNowPlaying();
+      maybeBroadcastHostPlayhead();
     } catch {}
   }, 500);
 }
 
+function maybeBroadcastHostPlayhead() {
+  const isHost = userId && hostUserId && userId === hostUserId;
+  if (!isHost) return;
+  if (!sessionId) return;
+  if (!nowPlaying?.track) return;
+  if (!nowPlaying.isPlaying) return;
+
+  const now = Date.now();
+
+  // throttle: at most once per second
+  if (now - lastHostPlayheadSentAt < 1000) return;
+
+  const ms = Math.floor(Number(nowPlaying.playheadMs || 0));
+
+  // don’t spam identical values
+  if (Math.abs(ms - lastHostPlayheadSentMs) < 800) return;
+
+  lastHostPlayheadSentAt = now;
+  lastHostPlayheadSentMs = ms;
+
+  send("host:state", {
+    sessionId,
+    nowPlaying: {
+      ...nowPlaying,
+      playheadMs: ms,
+      updatedAt: now,
+    },
+  });
+}
 
 // ---------- Now playing UI ----------
 
@@ -1294,9 +1331,6 @@ function startHostAutoAdvance() {
 
       autoAdvanceLock = true;
 
-      // ✅ End-of-track: do NOT pause during transition; the provider is already stopped/reset
-      suppressTransitionPauseOnce = true;
-
       lastApplePosMs = 0;
       lastSpotifyPosMs = 0;
       
@@ -1306,15 +1340,6 @@ function startHostAutoAdvance() {
     } catch {
       // ignore transient polling failures
     }
-  }, 500);
-}
-
-function startUiTick() {
-  setInterval(() => {
-    if (isScrubbing) return;
-    if (playbackSource === "spotify") return;
-   if (playbackSource === "apple") return;
-    renderNowPlaying();
   }, 500);
 }
 
@@ -1787,7 +1812,7 @@ function wireUi() {
       const userToken = await mk.authorize(); // triggers Apple sign-in
       localStorage.setItem(APPLE_USER_TOKEN_KEY, userToken);
       el("sessionMeta").textContent = "Apple Music connected!";
-      await switchPlaybackSource();
+      await switchPlaybackSource("apple");
       await reloadMusic();
       renderConnectPrompt();
       renderConnectButtons();

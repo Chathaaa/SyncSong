@@ -56,7 +56,8 @@ export function makeControls({ getPlaybackSource, getNowPlaying, onNextShared, o
 
   async function playerToggle() {
     // optional: read current state and toggle
-    return playerPlay();
+    const np = getNowPlaying();
+    return np?.isPlaying ? playerPause() : playerPlay();
   }
 
   

@@ -234,7 +234,7 @@ export async function applePlayTrack(track) {
 
   try {
     // Wait for the SDK to report the new item (avoids playing the old item briefly)
-    //await waitForMediaItemChange(800);
+    await waitForMediaItemChange(800);
   } catch {}
 
   // Kick playback once the new item is available
@@ -296,7 +296,7 @@ export async function applePlay() {
 
 export async function appleNext() {
   const mk = await appleEnsureAuthorized();
-  mk.skipToNextItem();
+  await mk.skipToNextItem();
 }
 
 export async function appleSetVolume(v) {
@@ -372,12 +372,12 @@ export async function loadAppleTracks(playlistId) {
 export async function appleSeek(seconds) {
   const mk = await appleEnsureAuthorized();
   // MusicKit uses seconds
-  mk.seekToTime(Number(seconds) || 0);
+  await mk.seekToTime(Number(seconds) || 0);
 }
 
 export async function applePrev() {
   const mk = await appleEnsureAuthorized();
-  mk.skipToPreviousItem();
+  await mk.skipToPreviousItem();
 }
 
 export async function appleGetPlaybackState() {
