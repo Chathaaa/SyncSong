@@ -1909,5 +1909,4 @@ renderPlaybackSource();
 setSource(musicSource);
 renderConnectPrompt();
 renderConnectButtons();
-startUiTick();
 startHostAutoAdvance();
