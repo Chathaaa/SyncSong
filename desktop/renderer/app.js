@@ -343,7 +343,7 @@ function connectWS() {
     renderRejoinButton();
   };
 
-  ws.onmessage = (e) => {
+  ws.onmessage = async (e) => {
     const msg = JSON.parse(e.data);
 
     if (msg.type === "hello") {
@@ -414,23 +414,23 @@ function connectWS() {
     if (msg.type === "control:next") {
       const isHost = userId && hostUserId && userId === hostUserId;
       if (!isHost) return;
-       playNextInSharedQueue();
+      await playNextInSharedQueue();
       return;
     }
 
     if (msg.type === "control:prev") {
       const isHost = userId && hostUserId && userId === hostUserId;
       if (!isHost) return;
-       playPrevInSharedQueue();
+      await playPrevInSharedQueue();
       return;
     }
 
     if (msg.type === "control:toggle") {
       const isHost = userId && hostUserId && userId === hostUserId;
       if (!isHost) return;
-      // mirror your npPlayPause handler logic, but do it host-side
+
       if (!nowPlaying?.queueId && queue.length) {
-         hostPlayQueueItem(queue[0]);
+        await hostPlayQueueItem(queue[0]);
         return;
       }
       if (!nowPlaying?.track) return;
@@ -440,11 +440,11 @@ function connectWS() {
 
       try {
         if (playbackSource === "apple") {
-          if (willPlay)  applePlay();
-          else  applePause();
+          if (willPlay) await applePlay();
+          else await applePause();
         } else if (playbackSource === "spotify") {
-          if (willPlay)  playerPlay();
-          else  playerPause();
+          if (willPlay) await playerPlay();
+          else await playerPause();
         }
       } catch {}
 
@@ -465,7 +465,7 @@ function connectWS() {
       stopSpotifyStateSync();
       stopAppleStateSync();
 
-      try { playerSeek(secs); } catch {}
+      try { await playerSeek(secs); } catch {}
 
       const playheadMs = Math.floor(secs * 1000);
       nowPlaying = { ...nowPlaying, playheadMs, updatedAt: Date.now() };
@@ -991,13 +991,6 @@ async function syncClientToNowPlaying() {
     return;
   }
 
-  // ✅ Reassert play state after switching tracks (host shouldn't end up paused)
-  if (nowPlaying?.isPlaying) {
-    try {
-      if (playbackSource === "apple") await applePlay();
-      else if (playbackSource === "spotify") await playerPlay();
-    } catch {}
-  }
 
   lastLoadedQueueKey = loadKey;
   localActiveQueueId = nowPlaying.queueId;
@@ -1005,6 +998,13 @@ async function syncClientToNowPlaying() {
   try {
     await stopAllLocalPlayback();
     await playTrackOnMySource(nowPlaying.track);
+    // ✅ Reassert play state after switching tracks (host shouldn't end up paused)
+    if (nowPlaying?.isPlaying) {
+      try {
+        if (playbackSource === "apple") await applePlay();
+        else if (playbackSource === "spotify") await playerPlay();
+      } catch {}
+    }
   } catch (e) {
     el("sessionMeta").textContent =
       `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
@@ -1334,7 +1334,7 @@ async function advanceNextLikeButton() {
 
   // advance shared queue; hostPlayQueueItem receives isPlaying via playNextInSharedQueue
   hostIntentIsPlaying = wasPlaying;
-  await playerNext();
+  await playNextInSharedQueue()
 
   // DO NOT call applePlay()/playerPlay() here.
   // hostPlayQueueItem() will do it after the new track is loaded.
