@@ -64,6 +64,11 @@ const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
 
 const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
 
+const DISPLAY_NAME_KEY = "syncsong:displayName";
+const AUTO_ROOM_HINT_SEEN_KEY = "syncsong:autoRoomHintSeen";
+const LAST_SESSION_KEY = "syncsong:lastSessionId";
+const LAST_SESSION_AT_KEY = "syncsong:lastSessionAt";
+
 function hasSpotifyAuth() {
   return !!(localStorage.getItem("spotify:refresh_token") || localStorage.getItem("spotify:access_token"));
 }
@@ -83,11 +88,6 @@ function pickInitialPlaybackSource() {
 }
 
 let playbackSource = pickInitialPlaybackSource();
-
-const DISPLAY_NAME_KEY = "syncsong:displayName";
-const AUTO_ROOM_HINT_SEEN_KEY = "syncsong:autoRoomHintSeen";
-const LAST_SESSION_KEY = "syncsong:lastSessionId";
-const LAST_SESSION_AT_KEY = "syncsong:lastSessionAt";
 
 const VOLUME_KEY = "syncsong:playerVolume01"; // 0..1 local-only
 let playerVolume01 = (() => {
@@ -330,7 +330,7 @@ function connectWS() {
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
-    el("sessionMeta").textContent = "Connected";
+    el("sessionMeta").textContent = "";
     pendingCreate = false; // allow session:create to be attempted again
     renderRejoinButton();
   };
@@ -421,12 +421,24 @@ function connectWS() {
   };
 }
 
-// Apple developer token endpoint is provided by ./providers/apple.js
-
-// Spotify renderer helpers are moved to ./providers/spotify.js
-// See: renderer/providers/spotify.js
-
 // ---------- Music panel rendering + loading ----------
+
+function renderConnectPrompt() {
+  const box = el("connectPrompt");
+  if (!box) return;
+
+  const needsConnect = !hasSpotifyAuth() && !hasAppleAuth();
+  box.style.display = needsConnect ? "block" : "none";
+}
+
+function renderConnectButtons() {
+  const sp = el("connectSpotify");
+  const ap = el("connectApple");
+  const box = el("connectPrompt")
+
+  if (sp) sp.style.display = (hasSpotifyAuth() || box) ? "none" : "inline-block";
+  if (ap) ap.style.display = (hasAppleAuth() || box) ? "none" : "inline-block";
+}
 
 function renderMusicTabs() {
   //el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
@@ -435,6 +447,9 @@ function renderMusicTabs() {
 
   el("connectSpotify").style.display = (musicSource === "spotify") ? "inline-block" : "none";
   el("connectApple").style.display = (musicSource === "apple") ? "inline-block" : "none";
+
+  renderConnectButtons();
+
 }
 
 function renderLoopToggle() {
@@ -525,7 +540,17 @@ function renderMusicTracks() {
 
 // Spotify playlist/track helpers moved to providers/spotify.js
 async function loadSpotifyPlaylistsAndTracks() {
-  const { playlists: pls } = await import("./providers/spotify.js").then(m => m.loadSpotifyPlaylistsAndTracks());
+  const { playlists: pls, note } = await import("./providers/spotify.js").then(m => m.loadSpotifyPlaylistsAndTracks());
+
+  if (note) {
+    playlists = [];
+    tracks = [];
+    renderMusicPlaylists();
+    applySearch();
+    el("sessionMeta").textContent = note;
+    return;
+  }
+
   // app.js maintains the UI state
   playlists = pls;
   renderMusicPlaylists();
@@ -1521,6 +1546,9 @@ function wireUi() {
       "spotify:expires_at",
       String(Date.now() + (tok.expires_in || 0) * 1000)
     );
+
+    renderConnectPrompt();
+    renderConnectButtons();
   });
 
 
@@ -1543,6 +1571,15 @@ function wireUi() {
     });
   }
 
+  // Connect prompt buttons (first-time users)
+  el("connectPromptSpotify")?.addEventListener("click", () => {
+    el("connectSpotify")?.click();
+  });
+  el("connectPromptApple")?.addEventListener("click", () => {
+    el("connectApple")?.click();
+  });
+
+
   el("connectSpotify")?.addEventListener("click", async () => {
     try {
       // Web: if we already have a refresh token, refresh silently and skip popup.
@@ -1554,6 +1591,8 @@ function wireUi() {
           el("sessionMeta").textContent = "Spotify connected!";
           await switchPlaybackSource("spotify");
           await reloadMusic();
+          renderConnectPrompt();
+          renderConnectButtons();
           return;
         }
       }
@@ -1571,6 +1610,8 @@ function wireUi() {
         el("sessionMeta").textContent = "Spotify connected!";
         await switchPlaybackSource("spotify");
         await reloadMusic();
+        renderConnectPrompt();
+        renderConnectButtons();
       } catch (e) {
         // Keep the token (OAuth succeeded), but give a clear next step.
         el("sessionMeta").textContent = (e?.message || String(e));
@@ -1591,6 +1632,8 @@ function wireUi() {
       el("sessionMeta").textContent = "Apple Music connected!";
       await switchPlaybackSource();
       await reloadMusic();
+      renderConnectPrompt();
+      renderConnectButtons();
     } catch (e) {
       el("sessionMeta").textContent = "Apple connect failed: " + (e?.message || String(e));
     }
@@ -1682,5 +1725,7 @@ renderLoopToggle();
 renderShareButton();
 renderPlaybackSource();
 setSource(musicSource);
+renderConnectPrompt();
+renderConnectButtons();
 startUiTick();
 startHostAutoAdvance();

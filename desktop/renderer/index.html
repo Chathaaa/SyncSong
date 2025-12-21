@@ -50,8 +50,24 @@
     </div>
   </div>
 
+
   <div class="layout">
     <div class="leftPanel">
+      <div id="connectPrompt" class="callout" style="display:none;">
+        <div class="calloutTitle">Connect a music service to get started</div>
+        <div class="calloutBody">
+          SyncSong lets you build a shared queue from everyone's playlists and play it back on your preferred platform.
+          <br />
+          Sign in to Spotify or Apple Music to browse your library and add songs.
+        </div>
+        <div class="calloutActions">
+          <button id="connectPromptSpotify" type="button">Sign in with Spotify</button>
+          <button id="connectPromptApple" type="button">Sign in with Apple Music</button>
+        </div>
+        <div class="calloutFineprint">
+          You can connect both - playback uses your selected player.
+        </div>
+      </div>
         <div class="panelHeader">
             <div class="row">
             <button id="sourceSpotify" class="tab">Spotify</button>

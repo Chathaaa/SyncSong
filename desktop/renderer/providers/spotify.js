@@ -316,7 +316,9 @@ export async function spotifyPlayUriInApp(spotifyUri) {
 // Playlist & search helpers
 export async function loadSpotifyPlaylistsAndTracks() {
   const tok = getSpotifyAccessToken();
-  if (!tok) throw new Error("Spotify not connected. Click Connect Spotify.");
+  if (!tok) {
+    return { playlists: [], tracks: [], note: "Sign in with Spotify to load your library playlists." }
+  }
 
   const pls = await spotifyFetchAllPages("/me/playlists?limit=50");
 

@@ -294,7 +294,7 @@ export async function loadApplePlaylistsAndTracks() {
   await ensureAppleConfigured();
 
   if (!getAppleUserToken()) {
-    return { playlists: [], tracks: [], note: "Click \u201CConnect Apple\u201D to load your library playlists." };
+    return { playlists: [], tracks: [], note: "Sign in with Apple Music to load your library playlists." };
   }
 
   const pls = await appleFetchAllPages("/me/library/playlists?limit=100");
