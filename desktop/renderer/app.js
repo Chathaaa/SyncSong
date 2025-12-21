@@ -523,9 +523,10 @@ function renderConnectPrompt() {
 function renderConnectButtons() {
   const sp = el("connectSpotify");
   const ap = el("connectApple");
-  const box = el("connectPrompt")
+  const prompt = el("connectPrompt");
 
-  const promptVisible = box && box.style.display !== "none";
+  const promptVisible = prompt && prompt.style.display !== "none";
+
   if (sp) sp.style.display = (hasSpotifyAuth() || promptVisible) ? "none" : "inline-block";
   if (ap) ap.style.display = (hasAppleAuth() || promptVisible) ? "none" : "inline-block";
 }
@@ -535,6 +536,7 @@ function renderMusicTabs() {
   el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
   el("sourceApple")?.classList.toggle("active", musicSource === "apple");
 
+  renderConnectPrompt();
   renderConnectButtons();
 
 }
