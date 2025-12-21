@@ -411,6 +411,69 @@ function connectWS() {
       return;
     }
 
+    if (msg.type === "control:next") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+       playNextInSharedQueue();
+      return;
+    }
+
+    if (msg.type === "control:prev") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+       playPrevInSharedQueue();
+      return;
+    }
+
+    if (msg.type === "control:toggle") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+      // mirror your npPlayPause handler logic, but do it host-side
+      if (!nowPlaying?.queueId && queue.length) {
+         hostPlayQueueItem(queue[0]);
+        return;
+      }
+      if (!nowPlaying?.track) return;
+
+      const willPlay = !nowPlaying.isPlaying;
+      hostIntentIsPlaying = willPlay;
+
+      try {
+        if (playbackSource === "apple") {
+          if (willPlay)  applePlay();
+          else  applePause();
+        } else if (playbackSource === "spotify") {
+          if (willPlay)  playerPlay();
+          else  playerPause();
+        }
+      } catch {}
+
+      nowPlaying = { ...nowPlaying, isPlaying: willPlay, updatedAt: Date.now() };
+      send("host:state", { sessionId, nowPlaying });
+      renderNowPlaying();
+      return;
+    }
+
+    if (msg.type === "control:seek") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+
+      const secs = Number(msg.payload?.secs);
+      if (!Number.isFinite(secs) || secs < 0) return;
+
+      ignoreForMs(900);
+      stopSpotifyStateSync();
+      stopAppleStateSync();
+
+      try { playerSeek(secs); } catch {}
+
+      const playheadMs = Math.floor(secs * 1000);
+      nowPlaying = { ...nowPlaying, playheadMs, updatedAt: Date.now() };
+      send("host:state", { sessionId, nowPlaying });
+      renderNowPlaying();
+      return;
+    }
+
 
     if (msg.type === "error") {
       const message = String(msg.message || "");
@@ -804,7 +867,7 @@ async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
 
 async function playNextInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
-  if (!canControlPlayback()) return;
+  if (!isHost) return;
   if (!queue.length) return;
 
   // prevent pollers from fighting the transition
@@ -813,17 +876,6 @@ async function playNextInSharedQueue() {
   stopAppleStateSync();
 
   const wasPlaying = hostIntentIsPlaying;
-
-  // ✅ Manual next/prev may still pause. Auto-end should NOT pause (provider already ended+reset).
-  if (!suppressTransitionPauseOnce) {
-    try {
-      if (playbackSource === "apple") await applePause();
-      if (playbackSource === "spotify") await playerPause();
-    } catch {}
-  } else {
-    suppressTransitionPauseOnce = false; // one-shot
-  }
-
 
   if (!nowPlaying?.queueId) {
     await hostPlayQueueItem(queue[0], { isPlaying: wasPlaying });
@@ -850,17 +902,12 @@ async function playNextInSharedQueue() {
 
 async function playPrevInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
-  if (!canControlPlayback()) return;
+  if (!isHost) return;
   if (!queue.length) return;
 
   ignoreForMs(1500);
   stopSpotifyStateSync();
   stopAppleStateSync();
-
-  try {
-    if (playbackSource === "spotify") await playerPause();
-    if (playbackSource === "apple") await applePause();
-  } catch {}
 
   if (!nowPlaying?.queueId) {
     await hostPlayQueueItem(queue[0]);
@@ -942,6 +989,14 @@ async function syncClientToNowPlaying() {
     } catch {}
     await maybeSeekToTarget();          // ✅ apply seek on guests too
     return;
+  }
+
+  // ✅ Reassert play state after switching tracks (host shouldn't end up paused)
+  if (nowPlaying?.isPlaying) {
+    try {
+      if (playbackSource === "apple") await applePlay();
+      else if (playbackSource === "spotify") await playerPlay();
+    } catch {}
   }
 
   lastLoadedQueueKey = loadKey;
@@ -1409,6 +1464,11 @@ function wireUi() {
 
   // Host controls
   el("npPlayPause")?.addEventListener("click", async () => {
+    const isHost = userId && hostUserId && userId === hostUserId;
+    if (!isHost) {
+      send("control:toggle", { sessionId });
+      return;
+    }
     if (!canControlPlayback()) return;
 
 
@@ -1453,25 +1513,26 @@ function wireUi() {
   el("npNext")?.addEventListener("click", async () => {
     if (!canControlPlayback()) return;
 
-    // keep intent in sync with UI state
-    hostIntentIsPlaying = !!nowPlaying?.isPlaying;
+    const isHost = userId && hostUserId && userId === hostUserId;
+    if (!isHost) {
+      send("control:next", { sessionId });
+      return;
+    }
 
-    // just advance; hostPlayQueueItem() will reassert play if needed
-    await playerNext();
+    hostIntentIsPlaying = !!nowPlaying?.isPlaying;
+    await playNextInSharedQueue();
   });
 
   el("npPrev")?.addEventListener("click", async () => {
     if (!canControlPlayback()) return;
 
-    const wasPlaying = hostIntentIsPlaying;
-    await playerPrev();
-
-    if (wasPlaying) {
-      try {
-        if (playbackSource === "apple") await applePlay();
-        else if (playbackSource === "spotify") await playerPlay();
-      } catch {}
+    const isHost = userId && hostUserId && userId === hostUserId;
+    if (!isHost) {
+      send("control:prev", { sessionId });
+      return;
     }
+
+    await playPrevInSharedQueue();
   });
 
   // Seek bar
@@ -1556,36 +1617,80 @@ function wireUi() {
       if (!dragging) return;
       dragging = false;
 
-      if (!canControlPlayback() || !nowPlaying) { isScrubbing = false; return; }
+      if (!nowPlaying) {
+        isScrubbing = false;
+        setScrubbing(false);
+        return;
+      }
 
       const pct = pctFromEvent(e);
-      const dur = nowPlaying.track?.durationMs || 0;
-      if (dur) {
-        const secs = (dur * pct) / 1000;
+      const durMs = Number(nowPlaying.track?.durationMs || 0);
+      if (!durMs) {
+        isScrubbing = false;
+        setScrubbing(false);
+        return;
+      }
 
-        // seek
+      // Clamp and compute target
+      const clampedPct = Math.max(0, Math.min(1, pct));
+      const targetMs = Math.max(0, Math.min(durMs - 250, Math.floor(durMs * clampedPct)));
+      const secs = targetMs / 1000;
+
+      const isHost = userId && hostUserId && userId === hostUserId;
+
+      if (!isHost) {
+        // -------------------------
+        // GUEST: request seek from host
+        // -------------------------
+        send("control:seek", {
+          sessionId,
+          secs,
+        });
+
+        // Optimistic UI update (will be corrected by host broadcast)
+        nowPlaying = {
+          ...nowPlaying,
+          playheadMs: targetMs,
+        };
+        renderNowPlaying();
+
+        isScrubbing = false;
+        setScrubbing(false);
+        return;
+      }
+
+      // -------------------------
+      // HOST: perform the seek
+      // -------------------------
+      try {
+        // prevent pollers from snapping UI back mid-seek
+        ignoreForMs(900);
+        stopSpotifyStateSync();
+        stopAppleStateSync();
+
         await playerSeek(secs);
 
-        // resume if it was playing
+        // Resume playback if it was playing before scrub
         if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
           try { await playerPlay(); } catch {}
         }
 
-        // broadcast accurate shared state
-        const playheadMs = Math.floor(secs * 1000);
         nowPlaying = {
           ...nowPlaying,
-          playheadMs,
+          playheadMs: targetMs,
           updatedAt: Date.now(),
         };
+
         send("host:state", { sessionId, nowPlaying });
-        renderNowPlaying();;
+        renderNowPlaying();
+      } catch (err) {
+        console.warn("[seek] failed", err);
       }
 
       isScrubbing = false;
       setScrubbing(false);
-      renderNowPlaying();
     });
+
 
 
   }

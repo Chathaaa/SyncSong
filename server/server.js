@@ -231,6 +231,32 @@ wss.on("connection", (ws) => {
 
     const canControl = (userId === session.hostUserId) || !!session.allowGuestControl;
 
+    // --- Guest/host control commands: forward ONLY to host ---
+    if (type === "control:next" || type === "control:prev" || type === "control:toggle" || type === "control:seek") {
+      if (!canControl) {
+        safeSend(ws, { type: "error", message: "Host has not enabled guest controls" });
+        return;
+      }
+
+      const host = session.members.get(session.hostUserId);
+      if (!host?.ws) {
+        safeSend(ws, { type: "error", message: "Host not connected" });
+        return;
+      }
+
+      // Forward to host only; include who requested it (optional)
+      safeSend(host.ws, {
+        type,
+        payload: {
+          ...payload,
+          fromUserId: userId,
+          fromName: session.members.get(userId)?.displayName || "Guest",
+          sessionId,
+        }
+      });
+      return;
+    }
+
     if (type === "queue:add") {
       const t = payload?.track;
 
