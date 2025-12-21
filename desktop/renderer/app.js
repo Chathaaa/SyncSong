@@ -527,8 +527,29 @@ function renderConnectButtons() {
 
   const promptVisible = prompt && prompt.style.display !== "none";
 
-  if (sp) sp.style.display = (hasSpotifyAuth() || promptVisible) ? "none" : "inline-block";
-  if (ap) ap.style.display = (hasAppleAuth() || promptVisible) ? "none" : "inline-block";
+  // If the big prompt is visible, hide the small buttons
+  if (promptVisible) {
+    if (sp) sp.style.display = "none";
+    if (ap) ap.style.display = "none";
+    return;
+  }
+
+  // Only show the connect button for the CURRENT music tab
+  if (musicSource === "spotify") {
+    if (sp) sp.style.display = hasSpotifyAuth() ? "none" : "inline-block";
+    if (ap) ap.style.display = "none";
+    return;
+  }
+
+  if (musicSource === "apple") {
+    if (ap) ap.style.display = hasAppleAuth() ? "none" : "inline-block";
+    if (sp) sp.style.display = "none";
+    return;
+  }
+
+  // default safety
+  if (sp) sp.style.display = "none";
+  if (ap) ap.style.display = "none";
 }
 
 function renderMusicTabs() {
