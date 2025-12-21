@@ -247,8 +247,8 @@ export async function applePlayTrack(track) {
 }
 
 export async function applePause() {
+  if (!getAppleUserToken()) return;
   const mk = await appleEnsureAuthorized();
-  // ✅ In v3, mk.player may not exist; just pause best-effort
   await mk.pause();
 }
 

@@ -84,7 +84,7 @@ function pickInitialPlaybackSource() {
   if (stored === "apple" && hasAppleAuth()) return "apple";
   if (hasSpotifyAuth()) return "spotify";
   if (hasAppleAuth()) return "apple";
-  return stored || "apple";
+  return stored || "spotify";
 }
 
 let playbackSource = pickInitialPlaybackSource();
@@ -607,7 +607,7 @@ async function loadAppleTracks(playlistId) {
 // ---------- Music reload ----------
 
 async function reloadMusic() {
-  if (musicSource === "itunes") return loadItunesPlaylistsAndTracks();
+  if (musicSource === "apple") return loadApplePlaylistsAndTracks();
   if (musicSource === "spotify") return loadSpotifyPlaylistsAndTracks();
   return loadApplePlaylistsAndTracks();
 }
