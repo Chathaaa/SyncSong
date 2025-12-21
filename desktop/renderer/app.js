@@ -647,10 +647,48 @@ function renderMusicTracks() {
   });
 }
 
+async function ensureSpotifyLibraryReady() {
+  // We consider "connected" if refresh token exists (best) or access token exists
+  const rt = localStorage.getItem("spotify:refresh_token") || "";
+  const at = localStorage.getItem("spotify:access_token") || "";
+
+  if (!rt && !at) return false;
+
+  try {
+    const { spotifyEnsureAccessToken, spotifyFetch } = await import("./providers/spotify.js");
+
+    // If refresh token exists, refresh/ensure silently
+    if (rt) await spotifyEnsureAccessToken();
+
+    // sanity check: forces 401/403 to surface
+    await spotifyFetch("/me");
+    return true;
+  } catch (e) {
+    // If token is invalid/expired and refresh didn’t work, clear and show connect again
+    console.warn("[spotify] auth invalid; clearing tokens", e);
+    localStorage.removeItem("spotify:access_token");
+    localStorage.removeItem("spotify:refresh_token");
+    localStorage.removeItem("spotify:expires_at");
+    return false;
+  }
+}
 
 // Spotify playlist/track helpers moved to providers/spotify.js
 async function loadSpotifyPlaylistsAndTracks() {
-  const { playlists: pls, note } = await import("./providers/spotify.js").then(m => m.loadSpotifyPlaylistsAndTracks());
+  const ok = await ensureSpotifyLibraryReady();
+  if (!ok) {
+    playlists = [];
+    tracks = [];
+    renderMusicPlaylists();
+    applySearch();
+    el("sessionMeta").textContent = "Sign in with Spotify to load your library playlists.";
+    renderConnectPrompt();
+    renderConnectButtons();
+    return;
+  }
+
+  const { playlists: pls, note } =
+    await import("./providers/spotify.js").then(m => m.loadSpotifyPlaylistsAndTracks());
 
   if (note) {
     playlists = [];
@@ -661,7 +699,6 @@ async function loadSpotifyPlaylistsAndTracks() {
     return;
   }
 
-  // app.js maintains the UI state
   playlists = pls;
   renderMusicPlaylists();
   const selId = el("musicPlaylists").value;
@@ -671,6 +708,7 @@ async function loadSpotifyPlaylistsAndTracks() {
     applySearch();
   }
 }
+
 
 async function loadSpotifyTracks(playlistId) {
   const { tracks: t } = await import("./providers/spotify.js").then(m => m.loadSpotifyTracks(playlistId));
@@ -1922,14 +1960,21 @@ function wireUi() {
 }
 
 // ---------- Boot ----------
-connectWS();
-wireUi();
-renderRejoinButton();
-renderMusicTabs();
-renderLoopToggle();
-renderShareButton();
-renderPlaybackSource();
-setSource(musicSource);
-renderConnectPrompt();
-renderConnectButtons();
-startHostAutoAdvance();
+(async function boot() {
+  connectWS();
+  wireUi();
+  renderRejoinButton();
+  renderLoopToggle();
+  renderShareButton();
+  renderPlaybackSource();
+  renderConnectPrompt();
+  renderConnectButtons();
+  startHostAutoAdvance();
+
+  try {
+    await setSource(musicSource); // <-- IMPORTANT
+  } catch (e) {
+    console.error("[boot] setSource failed", e);
+    el("sessionMeta").textContent = `Load failed: ${e?.message || String(e)}`;
+  }
+})();
