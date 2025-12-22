@@ -41,6 +41,8 @@ let loopQueue = true; // default
 let autoAdvanceLock = false;
 let lastApplePosMs = 0;
 let lastSpotifyPosMs = 0;
+let lastAppleMaxPosMs = 0;      // max position seen (for end detection)
+let lastSpotifyMaxPosMs = 0;    // max position seen (for end detection)
 let lastAutoAdvanceQueueId = "";
 let lastAutoAdvanceSource = "";
 let lastHostPlayheadSentAt = 0;
@@ -474,7 +476,14 @@ function connectWS() {
       stopSpotifyStateSync();
       stopAppleStateSync();
 
-      try { await playerSeek(secs); } catch {}
+      try {
+        if (playbackSource === "apple") {
+          const { appleSeek } = await import("./providers/apple.js");
+          await appleSeek(secs);
+        } else {
+          await playerSeek(secs);
+        }
+      } catch {}
 
       const playheadMs = Math.floor(secs * 1000);
       nowPlaying = { ...nowPlaying, playheadMs, updatedAt: Date.now() };
@@ -1040,7 +1049,12 @@ async function syncClientToNowPlaying() {
     try {
       // ✅ give the seek a moment to apply before pollers snap UI back
       remoteSeekIgnoreUntil = Date.now() + 900;
-      await playerSeek(targetMs / 1000);
+      if (playbackSource === "apple") {
+        const { appleSeek } = await import("./providers/apple.js");
+        await appleSeek(targetMs / 1000);
+      } else {
+        await playerSeek(targetMs / 1000);
+      }
     } catch {}
   };
 
@@ -1302,14 +1316,18 @@ function startHostAutoAdvance() {
   if (hostAutoAdvanceTimer) clearInterval(hostAutoAdvanceTimer);
 
   hostAutoAdvanceTimer = setInterval(async () => {
+//     console.log("[autoAdvance tick]", {
+//   lock: autoAdvanceLock,
+//   queueId: nowPlaying?.queueId,
+//   src: playbackSource,
+//   hasTrack: !!nowPlaying?.track,
+//   qlen: queue?.length
+// });
     const isHost = userId && hostUserId && userId === hostUserId;
     if (!isHost || !sessionId) return;
 
-    if (!nowPlaying?.track) return;     // ✅ null-safe and allows end-of-track handling
+    if (!nowPlaying) return;     // ✅ null-safe and allows end-of-track handling
     if (!queue?.length) return;
-    if (autoAdvanceLock) return;
-
-
 
     // ✅ New shared item loaded → reset Apple end-detection state
     if (nowPlaying.queueId !== lastAutoAdvanceQueueId || playbackSource !== lastAutoAdvanceSource) {
@@ -1317,13 +1335,20 @@ function startHostAutoAdvance() {
       lastAutoAdvanceSource = playbackSource;
       lastApplePosMs = 0;
       lastSpotifyPosMs = 0;
+      lastAppleMaxPosMs = 0;
+      lastSpotifyMaxPosMs = 0;
       // ✅ new track is active → allow the next end-of-track advance
       autoAdvanceLock = false;
+      console.log("[autoAdvance] new track loaded; unlocking");
+      
+      return;
     }
+
+    if (autoAdvanceLock) return;
 
     try {
       let posMs = null;
-      let durMs = Number(nowPlaying.track.durationMs);
+      let durMs = Number(nowPlaying?.track?.durationMs || 0);
       const END_BUFFER_MS = playbackSource === "apple" ? 1000 : 1000;
 
       let providerIsPlaying = true; // default
@@ -1332,29 +1357,28 @@ function startHostAutoAdvance() {
       if (playbackSource === "spotify") {
         const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
         const s = await spotifyGetPlaybackState();
+        if (!s) return; // or just skip this tick
 
-        // If SDK returns null sometimes, we can still detect "ended" via lastSpotifyPosMs
-        if (!s) {
-          return;
-          // durMs stays from metadata fallback
-        } else {
-          const currentUri = s?.track_window?.current_track?.uri || "";
-          if (lastSpotifyUriLoaded && currentUri && currentUri !== lastSpotifyUriLoaded) return;
+        const currentUri = s?.track_window?.current_track?.uri || "";
+        if (lastSpotifyUriLoaded && currentUri && currentUri !== lastSpotifyUriLoaded) return;
 
-          posMs = Number(s.position);
-          durMs = Number(s.duration);
-          providerIsPlaying = !s.paused;
-          
-          if (posMs > lastSpotifyPosMs) lastSpotifyPosMs = posMs; // ✅ track progress
-          // Snap-to-0 ended signal (paused + pos reset after being near end)
-    
-          if (!providerIsPlaying &&
-              posMs < 1000 &&
-              durMs > 10_000 &&
-              lastSpotifyPosMs >= durMs - END_BUFFER_MS) {
-            ended = true;
-          }
-        }
+        const posMsNow = Number(s.position ?? 0);
+        const durMsNow = Number(s.duration ?? 0);
+
+        // update shared locals
+        posMs = posMsNow;
+        durMs = durMsNow || durMs; // fallback if provider missing
+        providerIsPlaying = !s.paused;
+
+        // ✅ max tracking for end detection
+        const prevMaxPos = lastSpotifyMaxPosMs;
+        if (posMsNow > lastSpotifyMaxPosMs) lastSpotifyMaxPosMs = posMsNow;
+
+        const wasNearEnd = (durMsNow > 10_000) && (prevMaxPos >= durMsNow - END_BUFFER_MS);
+        const jumpedToStart = (posMsNow < 1000) && (prevMaxPos > 5000);
+
+        // Because you said Spotify reports paused=true at end, you can include it (optional)
+        if (wasNearEnd && jumpedToStart && s.paused) ended = true;
       }
 
       if (playbackSource === "apple") {
@@ -1372,30 +1396,35 @@ function startHostAutoAdvance() {
         providerIsPlaying = !!a.isPlaying;
 
         // Track last good position so we can detect the "snap to 0 when ended"
-        if (posMs > lastApplePosMs) lastApplePosMs = posMs;
-        
-        providerIsPlaying = !!a.isPlaying;
+        const prevMaxPos = lastAppleMaxPosMs;
+        if (posMs > lastAppleMaxPosMs) lastAppleMaxPosMs = posMs;
 
-        // ✅ Only advance once the provider has actually stopped and snapped back to ~0
-        if (!providerIsPlaying &&
-            posMs < 1000 &&
-            durMs > 10_000 &&
-            lastApplePosMs >= durMs - END_BUFFER_MS) {
-          ended = true;
-        }
+        const jumpedToStart = (posMs < 1000) && (prevMaxPos > 5000);
+        const wasNearEnd = (durMs > 10_000) && (prevMaxPos >= durMs - END_BUFFER_MS);
+        if (wasNearEnd && jumpedToStart && !providerIsPlaying) ended = true;
       }
 
-      // If user paused mid-track, do nothing
-      if (!ended) return;
 
-      
+      if (!ended) return;
 
       autoAdvanceLock = true;
 
-      lastApplePosMs = 0;
-      lastSpotifyPosMs = 0;
-      
-      await advanceNextLikeButton();
+      const unlockTimer = setTimeout(() => {
+        // if we're still locked, release it so polling resumes
+        autoAdvanceLock = false;
+      }, 4000);
+      try {
+        lastAppleMaxPosMs = 0;
+        lastSpotifyMaxPosMs = 0;
+        await playNextInSharedQueue();
+        clearTimeout(unlockTimer);
+      } catch (e) {
+        clearTimeout(unlockTimer);
+        console.warn("[autoAdvance] advance failed", e);
+        console.warn("[autoAdvance] failed; unlocking", e);
+        // Important: don't get stuck
+        autoAdvanceLock = false;
+      }
 
 
     } catch {
@@ -1678,8 +1707,11 @@ function wireUi() {
 
       // Optional but recommended for smoothness:
       // pause locally while scrubbing if it was playing
-      if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
-        try { await playerPause(); } catch {}
+      if (scrubWasPlaying) {
+        try {
+          if (playbackSource === "apple") await applePause();
+          else await playerPause();
+        } catch {}
       }
 
       dragging = true;
@@ -1747,13 +1779,18 @@ function wireUi() {
         stopSpotifyStateSync();
         stopAppleStateSync();
 
-        await playerSeek(secs);
-
-        // Resume playback if it was playing before scrub
-        if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
-          try { await playerPlay(); } catch {}
+        if (playbackSource === "apple") {
+          const { appleSeek } = await import("./providers/apple.js");
+          await appleSeek(secs);
+          if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+            try { await applePlay(); } catch {}
+          }
+        } else {
+          await playerSeek(secs);
+          if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+            try { await playerPlay(); } catch {}
+          }
         }
-
         nowPlaying = {
           ...nowPlaying,
           playheadMs: targetMs,
