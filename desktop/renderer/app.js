@@ -24,6 +24,7 @@ let lastRejoinAttempt = "";
 let queue = [];
 let nowPlaying = null;
 let allowGuestControl = false;
+let partyMode = false;
 
 // unified music panel state
 let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "spotify | "apple"
@@ -137,6 +138,14 @@ function fmtMs(ms) {
 function setScrubbing(on) {
   document.body.classList.toggle("scrubbing", on);
   el("npProgress")?.classList.toggle("scrubbing", on);
+}
+
+function isHost() {
+  return userId && hostUserId && userId === hostUserId;
+}
+
+function isSilentGuest() {
+  return !!sessionId && partyMode && !isHost();
 }
 
 // ---------- Clipboard / Share ----------
@@ -265,6 +274,13 @@ function renderGuestControlToggle() {
   btn.textContent = `Guest controls: ${allowGuestControl ? "On" : "Off"}`;
 }
 
+function renderPartyModeToggle() {
+  const btn = el("togglePartyMode");
+  if (!btn) return;
+  if (!sessionId || !isHost()) { btn.style.display = "none"; return; }
+  btn.style.display = "inline-block";
+  btn.textContent = `Party mode: ${partyMode ? "On" : "Off"}`;
+}
 
 // ---------- Session meta ----------
 function renderSessionMeta() {
@@ -299,6 +315,7 @@ function renderSessionMeta() {
   renderRejoinButton();
   updatePeopleMeta();
   renderGuestControlToggle();
+  renderPartyModeToggle();
   // If we're in a session, the auto-room hint is no longer relevant
   if (sessionId) el("autoRoomHint") && (el("autoRoomHint").style.display = "none");
 }
@@ -380,6 +397,7 @@ function connectWS() {
       localStorage.setItem(LAST_SESSION_AT_KEY, String(Date.now()));
       hostUserId = msg.hostUserId;
       allowGuestControl = !!msg.allowGuestControl;
+      partyMode = !!msg.partyMode
       queue = msg.queue || [];
       nowPlaying = msg.nowPlaying || null;
 
@@ -388,6 +406,7 @@ function connectWS() {
       renderQueue();
       if (!document.hidden) renderNowPlaying();
 
+
       // ✅ IMPORTANT: guest join sync guard
       const isHost = userId && hostUserId && userId === hostUserId;
       if (!isHost && nowPlaying?.playheadMs > 0) {
@@ -395,6 +414,11 @@ function connectWS() {
         remoteSeekIgnoreUntil = Date.now() + 1200;
       }
 
+      // ✅ Party mode: guests do NOT sync playback. They should stop audio.
+      if (isSilentGuest()) {
+        await stopAllLocalPlayback();
+        return;
+      }
       syncClientToNowPlaying();
       return;
     }
@@ -418,6 +442,9 @@ function connectWS() {
       }
 
       if (!document.hidden) renderNowPlaying();
+      if (isSilentGuest()) {
+        return;
+      }
       syncClientToNowPlaying();
       return;
     }
@@ -1016,6 +1043,7 @@ async function playTrackOnMySource(track) {
 }
 
 async function syncClientToNowPlaying() {
+  if (isSilentGuest()) return
   if (!nowPlaying?.track) return;
 
   const loadKey = `${nowPlaying.queueId}:${playbackSource}`;
@@ -1103,6 +1131,7 @@ async function stopAllLocalPlayback() {
 let spotifyStateTimer = null;
 
 async function startSpotifyStateSync() {
+  if (isSilentGuest()) return;
   // If we're in the ignore window, schedule a start right after it ends.
   const waitMs = Math.max(0, spotifyPollIgnoreUntil - Date.now());
   if (waitMs > 0) {
@@ -1166,6 +1195,7 @@ function stopAppleStateSync() {
 }
 
 async function startAppleStateSync() {
+  if (isSilentGuest()) return;
   stopAppleStateSync();
 
   appleStateTimer = setInterval(async () => {
@@ -1529,6 +1559,11 @@ function wireUi() {
       sessionId,
       allowGuestControl: !allowGuestControl,
     });
+  });
+
+  el("togglePartyMode")?.addEventListener("click", () => {
+    if (!isHost() || !sessionId) return;
+    send("session:setPartyMode", { sessionId, partyMode: !partyMode });
   });
 
   el("rejoinLast")?.addEventListener("click", () => {

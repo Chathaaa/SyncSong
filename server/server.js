@@ -140,6 +140,7 @@ function state(sessionId, session) {
     sessionId,
     hostUserId: session.hostUserId,
     allowGuestControl: !!session.allowGuestControl,
+    partyMode: !!session.partyMode, 
     members: Array.from(session.members.entries()).map(([userId, m]) => ({
       userId,
       displayName: m.displayName,
@@ -174,6 +175,7 @@ wss.on("connection", (ws) => {
       const session = {
         hostUserId: userId,
         allowGuestControl: false,
+        partyMode: false,
         members: new Map(),
         queue: [],
         nowPlaying: null,
@@ -221,6 +223,25 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (type === "session:setPartyMode") {
+      const sessionId = joinedSessionId || String(payload?.sessionId || "").trim().toUpperCase();
+      const session = sessions.get(sessionId);
+      if (!session) {
+        safeSend(ws, { type: "error", message: "Not in a valid session" });
+        return;
+      }
+      if (userId !== session.hostUserId) {
+        safeSend(ws, { type: "error", message: "Only host can change party mode" });
+        return;
+      }
+
+      session.partyMode = !!payload?.partyMode;
+
+      // Broadcast full session state so everyone updates immediately
+      broadcast(session, state(sessionId, session));
+      return;
+    }
+    
     // From here: require a session
     const sessionId = joinedSessionId || String(payload?.sessionId || "").trim().toUpperCase();
     const session = sessions.get(sessionId);
