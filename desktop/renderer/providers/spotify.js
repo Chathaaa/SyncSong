@@ -184,7 +184,7 @@ export async function ensureSpotifyWebPlayer() {
         cb("");
       }
     },
-    volume: 0.8,
+    volume: Number(localStorage.getItem("syncsong:playerVolume01") ?? 1),
   });
 
   deviceReadyPromise = deviceReadyPromise || new Promise((resolve) => {
@@ -239,26 +239,35 @@ export async function spotifyPreparePlaybackDevice() {
 // Wait until the SDK reports that the current track URI matches `targetUri`.
 // Falls back to polling getCurrentState() in case events are flaky.
 function waitForSpotifyTrackChange(targetUri, { timeoutMs = 1200 } = {}) {
-  return new Promise(async (resolve) => {
+  return new Promise((resolve) => {
     let done = false;
 
-    const finish = (ok) => {
-      if (done) return;
-      done = true;
-      resolve(!!ok);
-    };
-
-    // Event-based (best case)
     const handler = (state) => {
       const uri = state?.track_window?.current_track?.uri || "";
       if (uri && uri === targetUri) finish(true);
     };
 
+    const cleanup = () => {
+      try {
+        if (spotifyPlayer?.removeListener) {
+          spotifyPlayer.removeListener("player_state_changed", handler);
+        }
+      } catch {}
+    };
+
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(!!ok);
+    };
+
     try {
-      if (spotifyPlayer?.addListener) spotifyPlayer.addListener("player_state_changed", handler);
+      if (spotifyPlayer?.addListener) {
+        spotifyPlayer.addListener("player_state_changed", handler);
+      }
     } catch {}
 
-    // Poll fallback (some browsers/users see missed events)
     const start = Date.now();
     const poll = async () => {
       if (done) return;
@@ -274,14 +283,7 @@ function waitForSpotifyTrackChange(targetUri, { timeoutMs = 1200 } = {}) {
     };
     poll();
 
-    // Hard timeout cleanup
-    setTimeout(() => {
-      if (done) return;
-      try {
-        if (spotifyPlayer?.removeListener) spotifyPlayer.removeListener("player_state_changed", handler);
-      } catch {}
-      finish(false);
-    }, timeoutMs + 50);
+    setTimeout(() => finish(false), timeoutMs + 50);
   });
 }
 
@@ -297,8 +299,12 @@ export async function spotifyPlayUriInApp(spotifyUri) {
   await spotifyPreparePlaybackDevice();
 
   // ✅ Kill the “old song blip” first (similar to your Apple pause-first fix)
-  try { await p.pause(); } catch {}
-
+  try {
+    await spotifyApi(`/me/player/pause?device_id=${encodeURIComponent(spotifyDeviceId)}`, {
+      method: "PUT",
+    });
+  } catch {}
+  
   // Start waiting *before* we issue /play (so we don't miss a fast event)
   const waitForChange = waitForSpotifyTrackChange(spotifyUri, { timeoutMs: 1400 });
 

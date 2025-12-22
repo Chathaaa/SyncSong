@@ -101,6 +101,7 @@ function pickInitialPlaybackSource() {
 let playbackSource = pickInitialPlaybackSource();
 
 const VOLUME_KEY = "syncsong:playerVolume01"; // 0..1 local-only
+
 let playerVolume01 = (() => {
   const v = Number(localStorage.getItem(VOLUME_KEY));
   return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 1;
@@ -1064,7 +1065,7 @@ async function syncClientToNowPlaying() {
         await applePlay();
         startAppleStateSync();
       } else if (playbackSource === "spotify") {
-        await playerPlay();
+        //await playerPlay();
         startSpotifyStateSync();
       }
     } catch {}
