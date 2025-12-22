@@ -26,7 +26,7 @@ let nowPlaying = null;
 let allowGuestControl = false;
 
 // unified music panel state
-let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "itunes" | "spotify | "apple"
+let musicSource = localStorage.getItem("syncsong:lastSource") || "spotify"; // "spotify | "apple"
 let playlists = [];      // [{id,name}]
 let tracks = [];         // unified track objects
 let tracksFiltered = [];
@@ -66,7 +66,6 @@ let dragQueueId = null;
 
 // ---------- Unified music panel ----------
 const LAST_SOURCE_KEY = "syncsong:lastSource";
-const LAST_ITUNES_PLAYLIST_KEY = "syncsong:lastItunesPlaylistIndex";
 const LAST_SPOTIFY_PLAYLIST_KEY = "syncsong:lastSpotifyPlaylistId";
 
 const LAST_APPLE_PLAYLIST_KEY = "syncsong:lastApplePlaylistId";
@@ -387,7 +386,7 @@ function connectWS() {
       updatePeopleMeta();
       renderSessionMeta();
       renderQueue();
-      renderNowPlaying();
+      if (!document.hidden) renderNowPlaying();
 
       // ✅ IMPORTANT: guest join sync guard
       const isHost = userId && hostUserId && userId === hostUserId;
@@ -418,7 +417,7 @@ function connectWS() {
         remoteSeekIgnoreUntil = Date.now() + 900;
       }
 
-      renderNowPlaying();
+      if (!document.hidden) renderNowPlaying();
       syncClientToNowPlaying();
       return;
     }
@@ -462,7 +461,7 @@ function connectWS() {
 
       nowPlaying = { ...nowPlaying, isPlaying: willPlay, updatedAt: Date.now() };
       send("host:state", { sessionId, nowPlaying });
-      renderNowPlaying();
+      if (!document.hidden) renderNowPlaying();
       return;
     }
 
@@ -489,7 +488,7 @@ function connectWS() {
       const playheadMs = Math.floor(secs * 1000);
       nowPlaying = { ...nowPlaying, playheadMs, updatedAt: Date.now() };
       send("host:state", { sessionId, nowPlaying });
-      renderNowPlaying();
+      if (!document.hidden) renderNowPlaying();
       return;
     }
 
@@ -563,7 +562,6 @@ function renderConnectButtons() {
 }
 
 function renderMusicTabs() {
-  //el("sourceItunes")?.classList.toggle("active", musicSource === "itunes");
   el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
   el("sourceApple")?.classList.toggle("active", musicSource === "apple");
 
@@ -603,7 +601,6 @@ function renderMusicPlaylists() {
   if (!playlists.length) return;
 
   let desired = null;
-  if (musicSource === "itunes") desired = localStorage.getItem(LAST_ITUNES_PLAYLIST_KEY);
   if (musicSource === "spotify") desired = localStorage.getItem(LAST_SPOTIFY_PLAYLIST_KEY);
   if (musicSource === "apple") desired = localStorage.getItem(LAST_APPLE_PLAYLIST_KEY);
 
@@ -937,7 +934,7 @@ async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
   localActiveQueueId = nowPlaying.queueId;
 
   send("host:state", { sessionId, nowPlaying });
-  renderNowPlaying();
+  if (!document.hidden) renderNowPlaying();
 
   await syncClientToNowPlaying();
 }
@@ -1149,7 +1146,7 @@ async function startSpotifyStateSync() {
         playheadMs: pos,
       };
 
-      renderNowPlaying();
+      if (!document.hidden) renderNowPlaying();
       maybeBroadcastHostPlayhead();
     } catch {}
   }, 500);
@@ -1195,7 +1192,7 @@ async function startAppleStateSync() {
         // NOTE: no startedAt updates here (you wanted to remove manual timestamping)
       };
 
-      renderNowPlaying();
+      if (!document.hidden) renderNowPlaying();
       maybeBroadcastHostPlayhead();
     } catch {}
   }, 500);
@@ -1289,7 +1286,6 @@ function renderNowPlaying() {
     const sourceLabel =
       t.source === "spotify" ? "Spotify" :
       t.source === "apple" ? "Apple Music" :
-      t.source === "itunes" ? "iTunes" : (t.source || "");
 
       // ${fmtMs(playhead)} / ${fmtMs(t.durationMs || 0)}
     subEl.textContent =
@@ -1519,7 +1515,7 @@ function wireUi() {
 
   // Copy button in "in-session" header
   el("copySession2")?.addEventListener("click", async () => {
-    await copyInvite();
+    await autoCopyInvitePulse();
   });
 
   el("leaveSession")?.addEventListener("click", async () => {
@@ -1615,7 +1611,7 @@ function wireUi() {
     };
 
     send("host:state", { sessionId, nowPlaying });
-    renderNowPlaying();
+    if (!document.hidden) renderNowPlaying();
   });
 
 
@@ -1764,7 +1760,7 @@ function wireUi() {
           ...nowPlaying,
           playheadMs: targetMs,
         };
-        renderNowPlaying();
+        if (!document.hidden) renderNowPlaying();
 
         isScrubbing = false;
         setScrubbing(false);
@@ -1783,12 +1779,12 @@ function wireUi() {
         if (playbackSource === "apple") {
           const { appleSeek } = await import("./providers/apple.js");
           await appleSeek(secs);
-          if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+          if (scrubWasPlaying) {
             try { await applePlay(); } catch {}
           }
         } else {
           await playerSeek(secs);
-          if (scrubWasPlaying && nowPlaying.track?.source !== "itunes") {
+          if (scrubWasPlaying) {
             try { await playerPlay(); } catch {}
           }
         }
@@ -1799,7 +1795,7 @@ function wireUi() {
         };
 
         send("host:state", { sessionId, nowPlaying });
-        renderNowPlaying();
+        if (!document.hidden) renderNowPlaying();
       } catch (err) {
         console.warn("[seek] failed", err);
       }
@@ -1996,6 +1992,13 @@ function wireUi() {
 
 
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) {
+    try { renderNowPlaying(); } catch {}
+    try { renderQueue(); } catch {}
+  }
+});
 
 // ---------- Boot ----------
 (async function boot() {
