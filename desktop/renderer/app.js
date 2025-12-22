@@ -316,6 +316,12 @@ function renderSessionMeta() {
   updatePeopleMeta();
   renderGuestControlToggle();
   renderPartyModeToggle();
+
+    // Visual cue: guest playback controls locked
+  document.body.classList.toggle(
+    "guestLocked",
+    sessionId && !isHost() && !allowGuestControl
+  );
   // If we're in a session, the auto-room hint is no longer relevant
   if (sessionId) el("autoRoomHint") && (el("autoRoomHint").style.display = "none");
 }
@@ -350,6 +356,14 @@ async function leaveSession() {
   try { renderSessionMeta(); } catch {}
 
   if (el("sessionMeta")) el("sessionMeta").textContent = "Left room.";
+}
+
+let guestHintShown = false;
+
+function maybeShowGuestHint() {
+  if (guestHintShown || allowGuestControl || isHost()) return;
+  guestHintShown = true;
+  el("sessionMeta").textContent = "Playback requests are sent to the host.";
 }
 
 // ---------- WS ----------
@@ -1366,7 +1380,6 @@ function startHostAutoAdvance() {
       lastSpotifyMaxPosMs = 0;
       // ✅ new track is active → allow the next end-of-track advance
       autoAdvanceLock = false;
-      console.log("[autoAdvance] new track loaded; unlocking");
       
       return;
     }
@@ -1645,6 +1658,7 @@ function wireUi() {
       updatedAt: Date.now(),
     };
 
+    maybeShowGuestHint();
     send("host:state", { sessionId, nowPlaying });
     if (!document.hidden) renderNowPlaying();
   });
@@ -1655,6 +1669,7 @@ function wireUi() {
 
     const isHost = userId && hostUserId && userId === hostUserId;
     if (!isHost) {
+      maybeShowGuestHint();
       send("control:next", { sessionId });
       return;
     }
@@ -1668,6 +1683,7 @@ function wireUi() {
 
     const isHost = userId && hostUserId && userId === hostUserId;
     if (!isHost) {
+      maybeShowGuestHint();
       send("control:prev", { sessionId });
       return;
     }
