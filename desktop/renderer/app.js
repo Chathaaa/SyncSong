@@ -320,7 +320,7 @@ function renderSessionMeta() {
     // Visual cue: guest playback controls locked
   document.body.classList.toggle(
     "guestLocked",
-    sessionId && !isHost() && !allowGuestControl
+    !!sessionId && !isHost && !allowGuestControl
   );
   // If we're in a session, the auto-room hint is no longer relevant
   if (sessionId) el("autoRoomHint") && (el("autoRoomHint").style.display = "none");
