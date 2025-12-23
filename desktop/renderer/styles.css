@@ -362,6 +362,49 @@ button:disabled{ opacity: .42; cursor: not-allowed; }
   border: 1px solid rgba(255,255,255,0.08);
 }
 
+.item .actions{
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.item .actions button{
+  height: 28px;
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.playlistRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.playlistRow .addAllBtn {
+  margin-left: auto;
+}
+
+.addAllBtn {
+  background: transparent;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.addAllBtn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.addAllBtn {
+  opacity: 0.9;
+}
+
 /* Host controls row */
 .hostControls{
   margin: 8px 0;

@@ -34,7 +34,7 @@ let tracksFiltered = [];
 let lastLoadedQueueKey = ""; // queueId:playbackSource
 
 // session + UX helpers
-let pendingAddTrack = null;
+let pendingAddTracks = [];
 let pendingCreate = false;
 
 // playback behavior
@@ -392,14 +392,16 @@ function connectWS() {
       renderSessionMeta();
 
       // If user clicked +Add before session existed, add now
-      if (pendingAddTrack) {
-        const t = pendingAddTrack;
-        pendingAddTrack = null;
-        send("queue:add", { sessionId, track: t });
-        // auto-copy invite for convenience
+      if (pendingAddTracks.length) {
+        const batch = pendingAddTracks.slice();
+        pendingAddTracks.length = 0;
+
+        for (const t of batch) {
+          send("queue:add", { sessionId, track: t });
+        }
+
         setTimeout(() => autoCopyInvitePulse(), 50);
       } else {
-        // created manually; still nice to copy
         setTimeout(() => autoCopyInvitePulse(), 50);
       }
       return;
@@ -693,6 +695,19 @@ function renderMusicTracks() {
 
     box.appendChild(row);
   });
+  updateAddAllButton();
+}
+
+function addAllToQueue() {
+  tracksFiltered.forEach((t) => {
+    addToQueue(t);
+  })
+}
+
+function updateAddAllButton() {
+  const btn = el("addAllTracks");
+  if (!btn) return;
+  btn.disabled = !tracksFiltered.length;
 }
 
 async function ensureSpotifyLibraryReady() {
@@ -819,7 +834,7 @@ async function setSource(next) {
 function ensureSessionForAdd(track) {
   if (sessionId) return true;
 
-  pendingAddTrack = track;
+  pendingAddTracks.push(track);
 
   // If we're not connected yet, don't lock pendingCreate forever
   if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1604,6 +1619,8 @@ function wireUi() {
     if (musicSource === "spotify") await loadSpotifyTracks(id);
     else await loadAppleTracks(id);
   });
+
+  el("addAllTracks")?.addEventListener("click", addAllToQueue)
 
   // Search
   el("searchMine")?.addEventListener("input", applySearch);
