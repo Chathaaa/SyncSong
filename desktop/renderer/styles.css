@@ -381,20 +381,24 @@ button:disabled{ opacity: .42; cursor: not-allowed; }
   display: flex;
   align-items: center;
   gap: 8px;
+  overflow: hidden;
 }
 
 .playlistRow .addAllBtn {
   margin-left: auto;
 }
 
+#musicPlaylists{
+  flex: 1 1 auto;
+}
+
+#searchMine{
+  flex: 1 1 auto;
+}
+
 .addAllBtn {
-  background: transparent;
-  border: 1px solid var(--border, #ccc);
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 13px;
-  cursor: pointer;
-  white-space: nowrap;
+  min-width: 80px;
+  flex: 1 0 80px;
 }
 
 .addAllBtn:hover {

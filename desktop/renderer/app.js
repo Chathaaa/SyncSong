@@ -819,7 +819,9 @@ async function loadAppleTracks(playlistId) {
 
 async function reloadMusic() {
   if (musicSource === "apple") return loadApplePlaylistsAndTracks();
-  if (musicSource === "spotify") return loadSpotifyPlaylistsAndTracks();
+  if (musicSource === "spotify") {
+    return loadSpotifyPlaylistsAndTracks();
+  }
   return loadApplePlaylistsAndTracks();
 }
 
