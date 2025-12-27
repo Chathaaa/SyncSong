@@ -1,42 +1,134 @@
-import http from "http";
-import crypto from "crypto";
+// server.js (ESM) — Combined WatchParty + SyncSong on one Render service
+
+import http from "node:http";
+import https from "node:https";
+import crypto from "node:crypto";
+import { URL } from "node:url";
 import { WebSocketServer } from "ws";
 import { SignJWT, importPKCS8 } from "jose";
 
 const PORT = process.env.PORT || 3000;
 
-/**
- * Apple Music developer token caching (in-memory)
- */
-let cachedAppleToken = null;     // string
-let cachedAppleTokenExpMs = 0;   // number (epoch ms)
-let cachedAppleKeyPromise = null; // Promise<CryptoKey>
+/* =========================================================
+   CORS (merged)
+   - Supports WatchParty's allowlist behavior (CORS_ORIGINS)
+   - Also allows headers needed for /apple/dev-token
+   ========================================================= */
 
-/**
- * Minimal CORS helpers (so Electron renderer / web clients can fetch the token)
- */
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "*")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+function setCors(req, res) {
+  const reqOrigin = req?.headers?.origin || "null";
+  const allowAny = ALLOWED_ORIGINS.includes("*");
+  const isAllowed =
+    allowAny ||
+    ALLOWED_ORIGINS.includes(reqOrigin) ||
+    (reqOrigin === "null" && ALLOWED_ORIGINS.includes("null"));
+
+  res.setHeader(
+    "Access-Control-Allow-Origin",
+    allowAny ? "*" : isAllowed ? reqOrigin : (ALLOWED_ORIGINS[0] || "*")
+  );
+  res.setHeader("Vary", "Origin");
+
+  // union of both servers
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,Authorization"
+  );
 }
 
-function json(res, status, obj) {
-  setCors(res);
+function json(req, res, status, obj) {
+  setCors(req, res);
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(obj));
 }
 
-function text(res, status, body) {
-  setCors(res);
+function text(req, res, status, body) {
+  setCors(req, res);
   res.writeHead(status, { "Content-Type": "text/plain; charset=utf-8" });
   res.end(body);
 }
 
-/**
- * Load Apple private key from base64 env var and import as ES256 key for jose.
- * IMPORTANT: We never log key contents.
- */
+/* =========================================================
+   WatchParty state + helpers
+   ========================================================= */
+
+const rooms = new Map(); // roomId -> { clients:Set<ws>, messages:[], userColors:Map<username,color>, lastActive:number }
+const HISTORY_LIMIT = 100;
+const COLORS = [
+  "#FF5733", "#33FF57", "#3357FF", "#FF33A8", "#FFC733",
+  "#33FFF2", "#A833FF", "#FF3333", "#33FF8D", "#FF8D33"
+];
+
+const feedback = []; // { message, at }
+const FEEDBACK_LIMIT = 500;
+
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, {
+      clients: new Set(),
+      messages: [],
+      userColors: new Map(),
+      lastActive: Date.now(),
+    });
+  }
+  return rooms.get(roomId);
+}
+
+function colorFor(room, username) {
+  if (!room.userColors.has(username)) {
+    const c = COLORS[Math.floor(Math.random() * COLORS.length)];
+    room.userColors.set(username, c);
+  }
+  return room.userColors.get(username);
+}
+
+function sendFeedbackToDiscord(message) {
+  const webhookUrl = process.env.DISCORD_FEEDBACK_WEBHOOK;
+  if (!webhookUrl) return;
+
+  try {
+    const url = new URL(webhookUrl);
+    const payload = JSON.stringify({
+      content: `💬 New site request:\n> ${message}`,
+    });
+
+    const options = {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+    };
+
+    const req = https.request(url, options, (res) => {
+      res.on("data", () => {});
+    });
+
+    req.on("error", (err) => {
+      console.error("[DISCORD] error sending feedback:", err);
+    });
+
+    req.write(payload);
+    req.end();
+  } catch (err) {
+    console.error("[DISCORD] invalid webhook URL:", err);
+  }
+}
+
+/* =========================================================
+   SyncSong Apple developer token (unchanged logic)
+   ========================================================= */
+
+let cachedAppleToken = null;      // string
+let cachedAppleTokenExpMs = 0;    // epoch ms
+let cachedAppleKeyPromise = null; // Promise<CryptoKey>
+
 async function getAppleSigningKey() {
   if (cachedAppleKeyPromise) return cachedAppleKeyPromise;
 
@@ -44,19 +136,13 @@ async function getAppleSigningKey() {
     const b64 = process.env.APPLE_PRIVATE_KEY_P8_BASE64;
     if (!b64) throw new Error("Missing APPLE_PRIVATE_KEY_P8_BASE64");
 
-    // The base64 you generated encodes the PEM text (BEGIN/END PRIVATE KEY)
     const pem = Buffer.from(b64, "base64").toString("utf8").trim();
-
-    // jose expects PKCS#8 PEM for importPKCS8 (this matches Apple's .p8 format)
     return importPKCS8(pem, "ES256");
   })();
 
   return cachedAppleKeyPromise;
 }
 
-/**
- * Return a cached Apple Music developer token, minting a fresh one when needed.
- */
 async function getAppleDevToken() {
   const teamId = process.env.APPLE_TEAM_ID;
   const keyId = process.env.APPLE_KEY_ID;
@@ -69,14 +155,12 @@ async function getAppleDevToken() {
   const nowMs = Date.now();
   const skewMs = skewSec * 1000;
 
-  // If cached token is still safely valid, reuse it
   if (cachedAppleToken && cachedAppleTokenExpMs - nowMs > skewMs) {
     return { token: cachedAppleToken, expMs: cachedAppleTokenExpMs };
   }
 
   const key = await getAppleSigningKey();
 
-  // Apple dev tokens are JWTs signed with ES256.
   const iat = Math.floor(nowMs / 1000);
   const exp = iat + ttlDays * 24 * 60 * 60;
 
@@ -93,35 +177,9 @@ async function getAppleDevToken() {
   return { token: cachedAppleToken, expMs: cachedAppleTokenExpMs };
 }
 
-const server = http.createServer(async (req, res) => {
-  // Always allow preflight for /apple/dev-token
-  if (req.method === "OPTIONS") {
-    setCors(res);
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  if (req.url === "/health") {
-    text(res, 200, "ok");
-    return;
-  }
-
-  // NEW: Apple Music developer token endpoint
-  if (req.url === "/apple/dev-token" && req.method === "GET") {
-    try {
-      const { token, expMs } = await getAppleDevToken();
-      json(res, 200, { token, exp: expMs });
-    } catch (e) {
-      json(res, 500, { error: e?.message || String(e) });
-    }
-    return;
-  }
-
-  text(res, 404, "not found");
-});
-
-const wss = new WebSocketServer({ server });
+/* =========================================================
+   SyncSong realtime sessions (WS) (mostly unchanged)
+   ========================================================= */
 
 const sessions = new Map(); // sessionId -> session
 
@@ -140,7 +198,7 @@ function state(sessionId, session) {
     sessionId,
     hostUserId: session.hostUserId,
     allowGuestControl: !!session.allowGuestControl,
-    partyMode: !!session.partyMode, 
+    partyMode: !!session.partyMode,
     members: Array.from(session.members.entries()).map(([userId, m]) => ({
       userId,
       displayName: m.displayName,
@@ -150,7 +208,314 @@ function state(sessionId, session) {
   };
 }
 
-wss.on("connection", (ws) => {
+/* =========================================================
+   HTTP server (merged routes)
+   ========================================================= */
+
+const server = http.createServer(async (req, res) => {
+  setCors(req, res);
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // Shared health
+  if (req.method === "GET" && (req.url === "/" || req.url.startsWith("/health"))) {
+    text(req, res, 200, "ok\n");
+    return;
+  }
+
+  // SyncSong: Apple Music dev token endpoint
+  if (req.method === "GET" && req.url === "/apple/dev-token") {
+    try {
+      const { token, expMs } = await getAppleDevToken();
+      json(req, res, 200, { token, exp: expMs });
+    } catch (e) {
+      json(req, res, 500, { error: e?.message || String(e) });
+    }
+    return;
+  }
+
+  // WatchParty: list active rooms
+  if (req.method === "GET" && req.url.startsWith("/games")) {
+    const now = Date.now();
+
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    for (const [rid, r] of rooms.entries()) {
+      if (r.clients.size === 0 && now - r.lastActive > DAY_MS) rooms.delete(rid);
+    }
+
+    const games = [];
+    for (const [rid, r] of rooms.entries()) {
+      if (r.clients.size > 0) {
+        games.push({ roomId: rid, clients: r.clients.size, lastActive: r.lastActive });
+      }
+    }
+    games.sort((a, b) => (b.clients - a.clients) || (b.lastActive - a.lastActive));
+
+    json(req, res, 200, { ok: true, games });
+    return;
+  }
+
+  // WatchParty: feedback endpoint
+  if (req.method === "POST" && req.url.startsWith("/feedback")) {
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 1e6) {
+        body = "";
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        req.socket.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      let msg = "";
+      try {
+        const parsed = JSON.parse(body || "{}");
+        msg = (parsed.message || "").toString().trim();
+      } catch {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+
+      if (!msg) {
+        json(req, res, 400, { ok: false, error: "empty_message" });
+        return;
+      }
+
+      const entry = { message: msg.slice(0, 1000), at: Date.now() };
+      feedback.push(entry);
+      if (feedback.length > FEEDBACK_LIMIT) feedback.shift();
+
+      console.log("[FEEDBACK]", entry);
+      sendFeedbackToDiscord(entry.message);
+
+      json(req, res, 200, { ok: true });
+    });
+
+    return;
+  }
+
+  // WatchParty: dashboard
+  if (req.method === "GET" && req.url.startsWith("/dashboard")) {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    res.end(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WatchParty Live Rooms</title>
+  <style>
+    body { font-family: system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#0f172a; color:#e5e7eb; margin:0; padding:16px; }
+    h1 { margin-top:0; font-size:1.4rem; }
+    .updated { font-size:0.85rem; color:#9ca3af; margin-bottom:12px; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; font-size:0.9rem; }
+    th, td { padding:8px 10px; border-bottom:1px solid rgba(55,65,81,0.7); text-align:left; }
+    th { background: rgba(15, 23, 42, 0.9); position: sticky; top: 0; }
+    tr:nth-child(even) td { background: rgba(15, 23, 42, 0.5); }
+    code { font-family: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace; }
+    .empty { margin-top:16px; color:#9ca3af; }
+  </style>
+</head>
+<body>
+  <h1>WatchParty – Live Rooms</h1>
+  <div class="updated" id="updated">Loading…</div>
+  <table id="rooms-table" style="display:none;">
+    <thead>
+      <tr><th>Room ID</th><th>Clients</th><th>Last Active</th></tr>
+    </thead>
+    <tbody id="rooms-body"></tbody>
+  </table>
+  <div id="empty" class="empty" style="display:none;">No active rooms right now.</div>
+
+  <script>
+    async function loadRooms() {
+      const updatedEl = document.getElementById("updated");
+      const table = document.getElementById("rooms-table");
+      const tbody = document.getElementById("rooms-body");
+      const emptyEl = document.getElementById("empty");
+
+      try {
+        const res = await fetch("/games");
+        const data = await res.json();
+        const games = data.games || [];
+
+        const now = new Date();
+        updatedEl.textContent = "Last updated: " + now.toLocaleTimeString();
+        tbody.innerHTML = "";
+
+        if (!games.length) {
+          table.style.display = "none";
+          emptyEl.style.display = "block";
+          return;
+        }
+
+        emptyEl.style.display = "none";
+        table.style.display = "table";
+
+        games.forEach(g => {
+          const tr = document.createElement("tr");
+
+          const tdRoom = document.createElement("td");
+          tdRoom.innerHTML = "<code>" + g.roomId + "</code>";
+
+          const tdClients = document.createElement("td");
+          tdClients.textContent = g.clients;
+
+          const tdLast = document.createElement("td");
+          tdLast.textContent = g.lastActive ? new Date(g.lastActive).toLocaleString() : "";
+
+          tr.appendChild(tdRoom);
+          tr.appendChild(tdClients);
+          tr.appendChild(tdLast);
+          tbody.appendChild(tr);
+        });
+      } catch (err) {
+        console.error("Error loading rooms:", err);
+        updatedEl.textContent = "Error loading rooms (see console).";
+        table.style.display = "none";
+        emptyEl.style.display = "block";
+        emptyEl.textContent = "Error loading rooms.";
+      }
+    }
+
+    loadRooms();
+    setInterval(loadRooms, 5000);
+  </script>
+</body>
+</html>`);
+    return;
+  }
+
+  // Fallback
+  text(req, res, 404, "not found\n");
+});
+
+/* =========================================================
+   WebSockets (two servers, one upgrade router)
+   - WatchParty: only /chat/<roomId>
+   - SyncSong: everything else (keeps existing WS_URL working)
+   ========================================================= */
+
+const wssWatchParty = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+const wssSyncSong = new WebSocketServer({ noServer: true, perMessageDeflate: false });
+
+// --- Heartbeats (good on Render) ---
+function heartbeat() { this.isAlive = true; }
+
+function addHeartbeat(wss, label) {
+  const pingInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (!ws.isAlive) return ws.terminate();
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }, 30000);
+
+  wss.on("connection", (ws) => {
+    ws.isAlive = true;
+    ws.on("pong", heartbeat);
+  });
+
+  wss.on("close", () => clearInterval(pingInterval));
+}
+
+addHeartbeat(wssWatchParty, "watchparty");
+addHeartbeat(wssSyncSong, "syncsong");
+
+// --- Upgrade router ---
+server.on("upgrade", (req, socket, head) => {
+  try {
+    const upgrade = req.headers.upgrade && String(req.headers.upgrade).toLowerCase();
+    if (upgrade !== "websocket") {
+      socket.destroy();
+      return;
+    }
+
+    // Parse path
+    const u = new URL(req.url, "http://localhost");
+    const path = u.pathname || "/";
+
+    // Route /chat/* to WatchParty; everything else -> SyncSong
+    const isWatchPartyChat = path.startsWith("/chat/") && path.length > "/chat/".length;
+
+    const target = isWatchPartyChat ? wssWatchParty : wssSyncSong;
+
+    target.handleUpgrade(req, socket, head, (ws) => {
+      target.emit("connection", ws, req);
+    });
+  } catch {
+    try { socket.destroy(); } catch {}
+  }
+});
+
+/* =========================================================
+   WatchParty WS behavior (/chat/<roomId>)
+   ========================================================= */
+
+wssWatchParty.on("connection", (ws, req) => {
+  const u = new URL(req.url, "http://localhost");
+  const roomId = decodeURIComponent(u.pathname.slice("/chat/".length));
+
+  const room = getRoom(roomId);
+  room.clients.add(ws);
+  room.lastActive = Date.now();
+  ws._roomId = roomId;
+
+  console.log(`[WP CONNECT] room="${roomId}" clients=${room.clients.size}`);
+
+  ws.send(JSON.stringify({ type: "history", messages: room.messages }));
+
+  ws.on("message", (data) => {
+    let incoming;
+    try { incoming = JSON.parse(data); }
+    catch {
+      console.error("[WP ERROR] Invalid JSON:", data?.toString?.().slice(0, 200));
+      return;
+    }
+
+    if (!incoming || typeof incoming.text !== "string" || !incoming.user) {
+      console.error("[WP ERROR] Missing fields:", incoming);
+      return;
+    }
+
+    const msg = {
+      type: "chat",
+      user: String(incoming.user).slice(0, 40),
+      text: String(incoming.text).slice(0, 2000),
+      timestamp: incoming.timestamp || Date.now(),
+      color: colorFor(room, incoming.user),
+      roomId,
+    };
+
+    room.messages.push(msg);
+    if (room.messages.length > HISTORY_LIMIT) room.messages.shift();
+    room.lastActive = Date.now();
+
+    room.clients.forEach((client) => {
+      if (client.readyState === 1) client.send(JSON.stringify(msg));
+    });
+  });
+
+  ws.on("close", () => {
+    const rid = ws._roomId;
+    const r = rooms.get(rid);
+    if (r) {
+      r.clients.delete(ws);
+      r.lastActive = Date.now();
+      console.log(`[WP DISCONNECT] room="${rid}" clients=${r.clients.size}`);
+    }
+  });
+});
+
+/* =========================================================
+   SyncSong WS behavior (default route)
+   ========================================================= */
+
+wssSyncSong.on("connection", (ws) => {
   const userId = uid();
   let joinedSessionId = null;
 
@@ -236,12 +601,10 @@ wss.on("connection", (ws) => {
       }
 
       session.partyMode = !!payload?.partyMode;
-
-      // Broadcast full session state so everyone updates immediately
       broadcast(session, state(sessionId, session));
       return;
     }
-    
+
     // From here: require a session
     const sessionId = joinedSessionId || String(payload?.sessionId || "").trim().toUpperCase();
     const session = sessions.get(sessionId);
@@ -252,8 +615,12 @@ wss.on("connection", (ws) => {
 
     const canControl = (userId === session.hostUserId) || !!session.allowGuestControl;
 
-    // --- Guest/host control commands: forward ONLY to host ---
-    if (type === "control:next" || type === "control:prev" || type === "control:toggle" || type === "control:seek") {
+    if (
+      type === "control:next" ||
+      type === "control:prev" ||
+      type === "control:toggle" ||
+      type === "control:seek"
+    ) {
       if (!canControl) {
         safeSend(ws, { type: "error", message: "Host has not enabled guest controls" });
         return;
@@ -265,7 +632,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Forward to host only; include who requested it (optional)
       safeSend(host.ws, {
         type,
         payload: {
@@ -273,19 +639,16 @@ wss.on("connection", (ws) => {
           fromUserId: userId,
           fromName: session.members.get(userId)?.displayName || "Guest",
           sessionId,
-        }
+        },
       });
       return;
     }
 
     if (type === "queue:add") {
       const t = payload?.track;
-
-      // backwards compatible: allow old shape that has title/artist
       const title = String(t?.title || "").trim();
       const artist = String(t?.artist || "").trim();
 
-      // new: prefer stable ids
       const source = String(t?.source || "").trim(); // apple/spotify/itunes
       const sourceId = String(
         t?.sourceId ||
@@ -299,14 +662,11 @@ wss.on("connection", (ws) => {
         safeSend(ws, { type: "error", message: "Invalid track (missing title/artist)" });
         return;
       }
-
-      // For apple/spotify we really want a stable id:
       if ((source === "apple" || source === "spotify") && !sourceId) {
         safeSend(ws, { type: "error", message: "Invalid track (missing sourceId)" });
         return;
       }
 
-      // Sanitize what you store (prevents huge payloads)
       const track = {
         source: source || "unknown",
         sourceId: sourceId || "",
@@ -347,7 +707,6 @@ wss.on("connection", (ws) => {
       return;
     }
 
-
     if (type === "queue:reorder") {
       if (!canControl) {
         safeSend(ws, { type: "error", message: "Only host can reorder (or host must enable guest controls)" });
@@ -362,14 +721,10 @@ wss.on("connection", (ws) => {
 
       const byId = new Map(session.queue.map((q) => [q.queueId, q]));
       const next = [];
-
-      // Build queue in requested order (ignore unknown ids)
       for (const id of order) {
         const item = byId.get(id);
         if (item) next.push(item);
       }
-
-      // Append anything missing (safety)
       if (next.length !== session.queue.length) {
         const seen = new Set(order);
         for (const q of session.queue) {
@@ -382,7 +737,6 @@ wss.on("connection", (ws) => {
       return;
     }
 
-
     if (type === "host:state") {
       if (!canControl) return;
       session.nowPlaying = payload?.nowPlaying || null;
@@ -390,12 +744,7 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (
-      type === "host:play" ||
-      type === "host:pause" ||
-      type === "host:resume" ||
-      type === "host:next"
-    ) {
+    if (type === "host:play" || type === "host:pause" || type === "host:resume" || type === "host:next") {
       if (!canControl) {
         safeSend(ws, { type: "error", message: "Only host can control playback (or host must enable guest controls)" });
         return;
@@ -423,4 +772,10 @@ wss.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, () => console.log("Server listening on", PORT));
+/* =========================================================
+   Start
+   ========================================================= */
+
+server.listen(PORT, () => {
+  console.log(`Combined HTTP+WS server listening on :${PORT}`);
+});
