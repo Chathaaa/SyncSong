@@ -20,6 +20,7 @@ let userId = null;
 let sessionId = null;
 let hostUserId = null;
 let lastRejoinAttempt = "";
+let pendingJoinCode = "";
 
 let queue = [];
 let nowPlaying = null;
@@ -81,6 +82,7 @@ const DISPLAY_NAME_KEY = "syncsong:displayName";
 const AUTO_ROOM_HINT_SEEN_KEY = "syncsong:autoRoomHintSeen";
 const LAST_SESSION_KEY = "syncsong:lastSessionId";
 const LAST_SESSION_AT_KEY = "syncsong:lastSessionAt";
+const ROOM_QUERY_PARAM = "room";
 
 function hasSpotifyAuth() {
   return !!(localStorage.getItem("spotify:refresh_token") || localStorage.getItem("spotify:access_token"));
@@ -183,7 +185,33 @@ async function copyTextToClipboard(text) {
 }
 
 function getInviteText() {
-  return `Join my SyncSong session: ${sessionId}\n\n`;
+  if (!sessionId) return window.location.origin;
+  const u = new URL(window.location.href);
+  u.search = "";
+  u.hash = "";
+  u.searchParams.set(ROOM_QUERY_PARAM, sessionId);
+  return u.toString();
+}
+
+function normalizeSessionCode(raw) {
+  return String(raw || "").trim().toUpperCase();
+}
+
+function requestJoinSession(rawCode) {
+  const code = normalizeSessionCode(rawCode);
+  if (!code) return false;
+
+  const displayName = getDisplayName("Guest");
+  lastRejoinAttempt = code;
+
+  if (send("session:join", { sessionId: code, displayName })) {
+    pendingJoinCode = "";
+    return true;
+  }
+
+  pendingJoinCode = code;
+  el("sessionMeta").textContent = "Connecting... joining room when ready.";
+  return false;
 }
 
 function renderShareButton() {
@@ -376,6 +404,19 @@ function maybeShowGuestHint() {
   el("sessionMeta").textContent = "Playback requests are sent to the host.";
 }
 
+function getRoomCodeFromUrl() {
+  try {
+    const u = new URL(window.location.href);
+    const code =
+      normalizeSessionCode(u.searchParams.get(ROOM_QUERY_PARAM)) ||
+      normalizeSessionCode(u.searchParams.get("session")) ||
+      normalizeSessionCode(u.searchParams.get("code"));
+    return code;
+  } catch {
+    return "";
+  }
+}
+
 // ---------- WS ----------
 function connectWS() {
   ws = new WebSocket(WS_URL);
@@ -384,6 +425,10 @@ function connectWS() {
     el("sessionMeta").textContent = "";
     pendingCreate = false; // allow session:create to be attempted again
     renderRejoinButton();
+
+    if (pendingJoinCode) {
+      requestJoinSession(pendingJoinCode);
+    }
   };
 
   ws.onmessage = async (e) => {
@@ -1776,10 +1821,9 @@ function wireUi() {
   }
 
   el("joinSession")?.addEventListener("click", () => {
-    const displayName = getDisplayName("Guest");
-    const code = (el("joinCode").value || "").trim().toUpperCase();
+    const code = normalizeSessionCode(el("joinCode").value);
     if (!code) return;
-    send("session:join", { sessionId: code, displayName });
+    requestJoinSession(code);
 
     // Hide hint once user takes action
     if (el("autoRoomHint")) el("autoRoomHint").style.display = "none";
@@ -1823,11 +1867,9 @@ function wireUi() {
   });
 
   el("rejoinLast")?.addEventListener("click", () => {
-    const code = (localStorage.getItem(LAST_SESSION_KEY) || "").trim().toUpperCase();
+    const code = normalizeSessionCode(localStorage.getItem(LAST_SESSION_KEY));
     if (!code) return;
-    const displayName = getDisplayName("Guest");
-    lastRejoinAttempt = code;
-    send("session:join", { sessionId: code, displayName });
+    requestJoinSession(code);
   });
 
   // Source toggle + reload
@@ -2319,8 +2361,13 @@ document.addEventListener("visibilitychange", () => {
 
 // ---------- Boot ----------
 (async function boot() {
+  const roomCodeFromUrl = getRoomCodeFromUrl();
+
   connectWS();
   wireUi();
+  if (roomCodeFromUrl && el("joinCode")) {
+    el("joinCode").value = roomCodeFromUrl;
+  }
   renderRejoinButton();
   renderLoopToggle();
   renderShareButton();
@@ -2328,6 +2375,11 @@ document.addEventListener("visibilitychange", () => {
   renderConnectPrompt();
   renderConnectButtons();
   startHostAutoAdvance();
+
+  if (roomCodeFromUrl) {
+    requestJoinSession(roomCodeFromUrl);
+    if (el("autoRoomHint")) el("autoRoomHint").style.display = "none";
+  }
 
   try {
     await setSource(musicSource); // <-- IMPORTANT
