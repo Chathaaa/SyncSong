@@ -2,6 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
+  <link rel="shortcut icon" href="#">
   <meta http-equiv="Content-Security-Policy"
     content="
       default-src 'self';
@@ -25,51 +26,82 @@
     ">
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>SyncSong</title>
-  <script type="module" crossorigin src="/assets/main-CwjrvWxH.js"></script>
+  <script type="module" crossorigin src="/assets/main-ChUS35bS.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-B5Qt9EMX.js">
-  <link rel="stylesheet" crossorigin href="/assets/main-Cb2v0N-C.css">
+  <link rel="stylesheet" crossorigin href="/assets/main-D98bDjUS.css">
 </head>
 <body>
   <div class="topbar">
     <div class="brand">SyncSong</div>
-    <div class="session">
+    <div class="session" id="topbarPreSession">
       <input id="displayName" placeholder="Display name" />
-      <button id="createSession">Create</button>
       <input id="joinCode" placeholder="Join code" />
       <button id="joinSession">Join</button>
       <button id="copySession">Copy invite</button>
+      <button id="rejoinLast" style="display:none;">Rejoin last</button>
       <div class="sessionMeta" id="sessionMeta"></div>
-      
+      <div class="sessionHint" id="autoRoomHint" style="display:none;"></div>
+      <div class="sessionMeta" id="sessionPeople" style="display:none;"></div>
+    </div>
+
+    <div class="sessionHeader" id="topbarInSession" style="display:none;">
+      <div class="hdrLine" id="sessionHeaderText">🎧 SyncSong | Room: ---- | You: --- | Host: ---</div>
+      <button id="copySession2" class="smallBtn" type="button">Copy invite</button>
+      <button id="toggleGuestControl" class="smallBtn" type="button" style="display:none;">Guest controls: Off</button>
+      <button id="togglePartyMode" class="smallBtn" type="button" style="display:none;">Party mode: Off</button>
+      <button id="leaveSession" class="smallBtn" type="button" title="Leave room">Leave</button>
     </div>
   </div>
 
+
   <div class="layout">
-    <div class="leftPanel">
-        <div class="panelHeader">
-            <div class="row">
-            <button id="sourceSpotify" class="tab">Spotify</button>
-            <button id="sourceApple" class="tab">Apple Music</button>
-
-            <button class="btnPrimary" id="connectSpotify" style="display:none;">Connect Spotify</button>
-            <button class="btnPrimary" id="connectApple" style="display:none;">Connect Apple</button>
-            </div>
+    <!-- <div class="panel"> -->
+      <div class="leftPanel">
+        <div id="connectPrompt" class="callout" style="display:none;">
+          <div class="calloutTitle">Connect a music service to get started</div>
+          <div class="calloutBody">
+            SyncSong lets you build a shared queue from everyone's playlists and play it back on your preferred platform.
+            <br />
+            Sign in to Spotify or Apple Music to browse your library and add songs.
+          </div>
+          <div class="calloutActions">
+            <button id="connectPromptSpotify" type="button">Sign in with Spotify</button>
+            <button id="connectPromptApple" type="button">Sign in with Apple Music</button>
+          </div>
+          <div class="calloutFineprint">
+            You can connect both - playback uses your selected player.
+          </div>
         </div>
-        <div style="margin-bottom:10px">
-            <select id="musicPlaylists"></select>
-            <input id="searchMine" placeholder="Search tracks..." />
-            <button id="reloadMusic" title="Reload">&#10227;</button>
-        </div>
+          <div class="panelHeader">
+              <div class="row">
+              <button id="sourceSpotify" class="tab">Spotify</button>
+              <button id="sourceApple" class="tab">Apple Music</button>
 
-        <div id="musicTracks"></div>
-    </div>
+              <button class="btnPrimary" id="connectSpotify" style="display:none;">Connect Spotify</button>
+              <button id="signOutSpotify" style="display:none;">Sign Out Spotify</button>
+              <button class="btnPrimary" id="connectApple" style="display:none;">Connect Apple</button>
+              <button id="signOutApple" style="display:none;">Sign Out Apple</button>
+              </div>
+          </div>
+          <div class="row rowWrap playlistRow" style="margin-bottom:10px">
+              <select id="musicPlaylists"></select>
+              <input id="searchMine" placeholder="Search tracks..." />
+              <button id="reloadMusic" title="Reload">&#10227;</button>
+              <div class="playlistActions">
+                <button class="addAllBtn" id="addAllTracks">+Add All</button>
+              </div>
+          </div>
 
+          <div id="musicTracks"></div>
+      </div>
+    <!-- </div> -->
     <div class="panel">
       <div class="panelTitle">Shared Playlist</div>
 
       <div class="nowPlaying" id="nowPlaying">
         <div class="npTop">
           <div class="npInfo">
-            <img id="npArt" class="npArt" src="" alt="" />
+            <img id="npArt" class="npArt" src="" alt="" style="display:none;" />
             <div class="npText">
               <div id="npTitle" class="npTitle">Not playing</div>
               <div id="npSub" class="npSub"></div>
@@ -100,8 +132,8 @@
         <label style="margin-right:8px;">
           Listen on:
           <select id="playbackSource">
-            <option value="apple">Apple Music</option>
             <option value="spotify">Spotify</option>
+            <option value="apple">Apple Music</option>
           </select>
         </label>
         <!-- <button id="hostPlay">Play</button>
@@ -109,6 +141,13 @@
         <button id="hostNext">Next</button>
         -->
         <button id="toggleLoop">Loop: On</button> 
+        <div class="volCtl" >
+          <!-- <span id="playerMuteTip" class="tip" data-tip="Mute"> -->
+            <button id="playerMute" class="iconBtn" type="button" aria-label="Mute">🔊</button>
+          <!-- </span> -->
+          <input id="playerVolume" class="volSlider" type="range" min="0" max="100" step="1" value="100" />
+          <span id="playerVolumeVal" class="volVal">100%</span>
+        </div>
       </div>
 
       <div class="list" id="queue"></div>

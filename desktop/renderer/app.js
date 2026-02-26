@@ -68,6 +68,8 @@ let dragQueueId = null;
 // ---------- Unified music panel ----------
 const LAST_SOURCE_KEY = "syncsong:lastSource";
 const LAST_SPOTIFY_PLAYLIST_KEY = "syncsong:lastSpotifyPlaylistId";
+const SPOTIFY_LIBRARY_TRACKS_ID = "__spotify_library_tracks__";
+const APPLE_LIBRARY_TRACKS_ID = "__apple_library_tracks__";
 
 const LAST_APPLE_PLAYLIST_KEY = "syncsong:lastApplePlaylistId";
 const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
@@ -99,6 +101,14 @@ function pickInitialPlaybackSource() {
 }
 
 let playbackSource = pickInitialPlaybackSource();
+let spotifyTracksLoadRequestId = 0;
+let appleTracksLoadRequestId = 0;
+let spotifyLibrarySearchRequestId = 0;
+let spotifyLibrarySearchTimer = null;
+let spotifyLibrarySearchResults = null;
+let appleLibrarySearchRequestId = 0;
+let appleLibrarySearchTimer = null;
+let appleLibrarySearchResults = null;
 
 const VOLUME_KEY = "syncsong:playerVolume01"; // 0..1 local-only
 
@@ -575,6 +585,8 @@ function renderConnectPrompt() {
 function renderConnectButtons() {
   const sp = el("connectSpotify");
   const ap = el("connectApple");
+  const spOut = el("signOutSpotify");
+  const apOut = el("signOutApple");
   const prompt = el("connectPrompt");
 
   const promptVisible = prompt && prompt.style.display !== "none";
@@ -583,25 +595,33 @@ function renderConnectButtons() {
   if (promptVisible) {
     if (sp) sp.style.display = "none";
     if (ap) ap.style.display = "none";
+    if (spOut) spOut.style.display = "none";
+    if (apOut) apOut.style.display = "none";
     return;
   }
 
   // Only show the connect button for the CURRENT music tab
   if (musicSource === "spotify") {
     if (sp) sp.style.display = hasSpotifyAuth() ? "none" : "inline-block";
+    if (spOut) spOut.style.display = hasSpotifyAuth() ? "inline-block" : "none";
     if (ap) ap.style.display = "none";
+    if (apOut) apOut.style.display = "none";
     return;
   }
 
   if (musicSource === "apple") {
     if (ap) ap.style.display = hasAppleAuth() ? "none" : "inline-block";
+    if (apOut) apOut.style.display = hasAppleAuth() ? "inline-block" : "none";
     if (sp) sp.style.display = "none";
+    if (spOut) spOut.style.display = "none";
     return;
   }
 
   // default safety
   if (sp) sp.style.display = "none";
   if (ap) ap.style.display = "none";
+  if (spOut) spOut.style.display = "none";
+  if (apOut) apOut.style.display = "none";
 }
 
 function renderMusicTabs() {
@@ -655,12 +675,130 @@ function renderMusicPlaylists() {
 
 function applySearch() {
   const q = (el("searchMine")?.value || "").toLowerCase().trim();
+  const isSpotifyAllLibrary =
+    musicSource === "spotify" &&
+    String(el("musicPlaylists")?.value || "") === SPOTIFY_LIBRARY_TRACKS_ID;
+  const isAppleAllLibrary =
+    musicSource === "apple" &&
+    String(el("musicPlaylists")?.value || "") === APPLE_LIBRARY_TRACKS_ID;
+
+  if (isSpotifyAllLibrary && q && spotifyLibrarySearchResults) {
+    tracksFiltered = spotifyLibrarySearchResults;
+    renderMusicTracks();
+    return;
+  }
+
+  if (isAppleAllLibrary && q && appleLibrarySearchResults) {
+    tracksFiltered = appleLibrarySearchResults;
+    renderMusicTracks();
+    return;
+  }
+
   tracksFiltered = !q
     ? tracks
     : tracks.filter((t) =>
         `${t.title} ${t.artist} ${t.album || ""}`.toLowerCase().includes(q)
       );
   renderMusicTracks();
+}
+
+async function searchAppleLibraryNow(term) {
+  const requestId = ++appleLibrarySearchRequestId;
+  const q = String(term || "").trim();
+  if (!q) {
+    appleLibrarySearchResults = null;
+    applySearch();
+    return;
+  }
+
+  el("sessionMeta").textContent = `Searching Apple library for "${q}"...`;
+  try {
+    const { searchAppleLibrarySongs } = await import("./providers/apple.js");
+    const { tracks: found } = await searchAppleLibrarySongs(q, { limit: 100 });
+    if (requestId !== appleLibrarySearchRequestId) return;
+    appleLibrarySearchResults = found;
+    tracksFiltered = found;
+    renderMusicTracks();
+    el("sessionMeta").textContent = `Found ${found.length} Apple library songs for "${q}".`;
+  } catch (e) {
+    if (requestId !== appleLibrarySearchRequestId) return;
+    appleLibrarySearchResults = null;
+    applySearch();
+    el("sessionMeta").textContent = `Apple search failed: ${e?.message || String(e)}`;
+  }
+}
+
+async function searchSpotifyLibraryNow(term) {
+  const requestId = ++spotifyLibrarySearchRequestId;
+  const q = String(term || "").trim();
+  if (!q) {
+    spotifyLibrarySearchResults = null;
+    applySearch();
+    return;
+  }
+
+  el("sessionMeta").textContent = `Searching Spotify library for "${q}"...`;
+  try {
+    const { searchSpotifyLibrarySongs } = await import("./providers/spotify.js");
+    const { tracks: found } = await searchSpotifyLibrarySongs(q, { limit: 50 });
+    if (requestId !== spotifyLibrarySearchRequestId) return;
+    spotifyLibrarySearchResults = found;
+    tracksFiltered = found;
+    renderMusicTracks();
+    el("sessionMeta").textContent = `Found ${found.length} Spotify library songs for "${q}".`;
+  } catch (e) {
+    if (requestId !== spotifyLibrarySearchRequestId) return;
+    spotifyLibrarySearchResults = null;
+    applySearch();
+    el("sessionMeta").textContent = `Spotify search failed: ${e?.message || String(e)}`;
+  }
+}
+
+function handleSearchInput() {
+  const q = (el("searchMine")?.value || "").trim();
+  const isSpotifyAllLibrary =
+    musicSource === "spotify" &&
+    String(el("musicPlaylists")?.value || "") === SPOTIFY_LIBRARY_TRACKS_ID;
+  const isAppleAllLibrary =
+    musicSource === "apple" &&
+    String(el("musicPlaylists")?.value || "") === APPLE_LIBRARY_TRACKS_ID;
+
+  if (!isSpotifyAllLibrary && !isAppleAllLibrary) {
+    spotifyLibrarySearchRequestId += 1;
+    spotifyLibrarySearchResults = null;
+    if (spotifyLibrarySearchTimer) clearTimeout(spotifyLibrarySearchTimer);
+    appleLibrarySearchRequestId += 1;
+    appleLibrarySearchResults = null;
+    if (appleLibrarySearchTimer) clearTimeout(appleLibrarySearchTimer);
+    applySearch();
+    return;
+  }
+
+  if (!q) {
+    spotifyLibrarySearchRequestId += 1;
+    spotifyLibrarySearchResults = null;
+    if (spotifyLibrarySearchTimer) clearTimeout(spotifyLibrarySearchTimer);
+    appleLibrarySearchRequestId += 1;
+    appleLibrarySearchResults = null;
+    if (appleLibrarySearchTimer) clearTimeout(appleLibrarySearchTimer);
+    applySearch();
+    return;
+  }
+
+  if (isSpotifyAllLibrary) {
+    if (spotifyLibrarySearchTimer) clearTimeout(spotifyLibrarySearchTimer);
+    spotifyLibrarySearchTimer = setTimeout(() => {
+      searchSpotifyLibraryNow(q);
+    }, 220);
+    return;
+  }
+
+  if (isAppleAllLibrary) {
+    if (appleLibrarySearchTimer) clearTimeout(appleLibrarySearchTimer);
+    appleLibrarySearchTimer = setTimeout(() => {
+      searchAppleLibraryNow(q);
+    }, 220);
+  }
 }
 
 function renderMusicTracks() {
@@ -744,7 +882,7 @@ async function loadSpotifyPlaylistsAndTracks() {
     tracks = [];
     renderMusicPlaylists();
     applySearch();
-    el("sessionMeta").textContent = "Sign in with Spotify to load your library playlists.";
+    el("sessionMeta").textContent = "Sign in with Spotify to load your library.";
     renderConnectPrompt();
     renderConnectButtons();
     return;
@@ -766,17 +904,60 @@ async function loadSpotifyPlaylistsAndTracks() {
   renderMusicPlaylists();
   const selId = el("musicPlaylists").value;
   if (selId) {
-    const { tracks: t } = await import("./providers/spotify.js").then(m => m.loadSpotifyTracks(selId));
-    tracks = t;
-    applySearch();
+    await loadSpotifyTracks(selId);
   }
 }
 
 
 async function loadSpotifyTracks(playlistId) {
-  const { tracks: t } = await import("./providers/spotify.js").then(m => m.loadSpotifyTracks(playlistId));
-  tracks = t;
+  const requestId = ++spotifyTracksLoadRequestId;
+  const selectedId = String(playlistId || "");
+  const isAllLibrary = selectedId === SPOTIFY_LIBRARY_TRACKS_ID;
+  let lastUiUpdateAt = 0;
+
+  spotifyLibrarySearchRequestId += 1;
+  spotifyLibrarySearchResults = null;
+  if (spotifyLibrarySearchTimer) clearTimeout(spotifyLibrarySearchTimer);
+
+  tracks = [];
   applySearch();
+  if (isAllLibrary) {
+    el("sessionMeta").textContent = "Loading Spotify library songs...";
+  }
+
+  const { loadSpotifyTracksProgressive } = await import("./providers/spotify.js");
+  const { tracks: t } = await loadSpotifyTracksProgressive(playlistId, {
+    onChunk: ({ tracks: chunkedTracks, total, done }) => {
+      if (requestId !== spotifyTracksLoadRequestId) return;
+
+      const now = Date.now();
+      if (!done && now - lastUiUpdateAt < 250) return;
+      lastUiUpdateAt = now;
+
+      tracks = chunkedTracks;
+      const currentSearchText = (el("searchMine")?.value || "").trim();
+      if (!(isAllLibrary && currentSearchText)) {
+        applySearch();
+      }
+
+      if (isAllLibrary) {
+        el("sessionMeta").textContent = done
+          ? `Loaded ${total} Spotify library songs.`
+          : `Loading Spotify library songs... ${total} loaded`;
+      }
+    },
+  });
+
+  if (requestId !== spotifyTracksLoadRequestId) return;
+  tracks = t;
+  const currentSearchText = (el("searchMine")?.value || "").trim();
+  if (!(isAllLibrary && currentSearchText)) {
+    applySearch();
+  }
+
+  if (isAllLibrary && currentSearchText) {
+    handleSearchInput();
+  }
 }
 
 async function spotifyFindUriForTrack(track) {
@@ -804,9 +985,54 @@ async function loadApplePlaylistsAndTracks() {
 }
 
 async function loadAppleTracks(playlistId) {
-  const { tracks: t } = await import("./providers/apple.js").then(m => m.loadAppleTracks(playlistId));
-  tracks = t;
+  const requestId = ++appleTracksLoadRequestId;
+  const selectedId = String(playlistId || "");
+  const isAllLibrary = selectedId === APPLE_LIBRARY_TRACKS_ID;
+  let lastUiUpdateAt = 0;
+
+  appleLibrarySearchRequestId += 1;
+  appleLibrarySearchResults = null;
+  if (appleLibrarySearchTimer) clearTimeout(appleLibrarySearchTimer);
+
+  tracks = [];
   applySearch();
+  if (isAllLibrary) {
+    el("sessionMeta").textContent = "Loading Apple library songs...";
+  }
+
+  const { loadAppleTracksProgressive } = await import("./providers/apple.js");
+  const { tracks: t } = await loadAppleTracksProgressive(playlistId, {
+    onChunk: ({ tracks: chunkedTracks, total, done }) => {
+      if (requestId !== appleTracksLoadRequestId) return;
+
+      const now = Date.now();
+      if (!done && now - lastUiUpdateAt < 250) return;
+      lastUiUpdateAt = now;
+
+      tracks = chunkedTracks;
+      const currentSearchText = (el("searchMine")?.value || "").trim();
+      if (!(isAllLibrary && currentSearchText)) {
+        applySearch();
+      }
+
+      if (isAllLibrary) {
+        el("sessionMeta").textContent = done
+          ? `Loaded ${total} Apple library songs.`
+          : `Loading Apple library songs... ${total} loaded`;
+      }
+    },
+  });
+
+  if (requestId !== appleTracksLoadRequestId) return;
+  tracks = t;
+  const currentSearchText = (el("searchMine")?.value || "").trim();
+  if (!(isAllLibrary && currentSearchText)) {
+    applySearch();
+  }
+
+  if (isAllLibrary && currentSearchText) {
+    handleSearchInput();
+  }
 }
 
 
@@ -1625,7 +1851,7 @@ function wireUi() {
   el("addAllTracks")?.addEventListener("click", addAllToQueue)
 
   // Search
-  el("searchMine")?.addEventListener("input", applySearch);
+  el("searchMine")?.addEventListener("input", handleSearchInput);
 
   // Loop toggle
   el("toggleLoop")?.addEventListener("click", () => {
@@ -1924,6 +2150,27 @@ function wireUi() {
   });
   el("connectPromptApple")?.addEventListener("click", () => {
     el("connectApple")?.click();
+  });
+
+  el("signOutSpotify")?.addEventListener("click", async () => {
+    localStorage.removeItem("spotify:access_token");
+    localStorage.removeItem("spotify:refresh_token");
+    localStorage.removeItem("spotify:expires_at");
+    localStorage.removeItem("spotify:oauth_state");
+    localStorage.removeItem("syncsong:lastSpotifyPlaylistId");
+    renderConnectPrompt();
+    renderConnectButtons();
+    await reloadMusic();
+    el("sessionMeta").textContent = "Signed out of Spotify.";
+  });
+
+  el("signOutApple")?.addEventListener("click", async () => {
+    localStorage.removeItem("syncsong:appleUserToken");
+    localStorage.removeItem("syncsong:lastApplePlaylistId");
+    renderConnectPrompt();
+    renderConnectButtons();
+    await reloadMusic();
+    el("sessionMeta").textContent = "Signed out of Apple Music.";
   });
 
 

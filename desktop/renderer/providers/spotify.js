@@ -3,9 +3,11 @@
 // ensureSpotifyWebPlayer, spotifyPlayUriInApp
 
 const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
+const SPOTIFY_LIBRARY_TRACKS_ID = "__spotify_library_tracks__";
 let spotifyPlaybackPrepared = false;
 let spotifyPreparedDeviceId = "";
 let __lastVolume = 0.8;
+let spotifyLibraryTracksCache = null;
 
 function getStoredClientId() {
   return localStorage.getItem("spotify:client_id") || "e87ab2180d5a438ba6f23670e3c12f3d";
@@ -67,6 +69,23 @@ function norm(s) {
 
 function cryptoRandomId() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
+function mapSpotifyItemsToTracks(items) {
+  return items
+    .map(it => it?.track || it)
+    .filter(Boolean)
+    .map(t => ({
+      id: cryptoRandomId(),
+      source: "spotify",
+      title: t.name,
+      artist: t.artists?.[0]?.name || "Unknown",
+      album: t.album?.name || "",
+      durationMs: t.duration_ms || 0,
+      spotifyTrackId: t.id,
+      spotifyUri: t.uri,
+      artworkUrl: t.album?.images?.[0]?.url || "",
+    }));
 }
 
 function spotifyPathFromNext(nextUrl) {
@@ -323,40 +342,91 @@ export async function spotifyPlayUriInApp(spotifyUri) {
 export async function loadSpotifyPlaylistsAndTracks() {
   const tok = getSpotifyAccessToken();
   if (!tok) {
-    return { playlists: [], tracks: [], note: "Sign in with Spotify to load your library playlists." }
+    return { playlists: [], tracks: [], note: "Sign in with Spotify to load your library." }
   }
 
   const pls = await spotifyFetchAllPages("/me/playlists?limit=50");
 
-  const playlists = pls.map(p => ({ id: p.id, name: p.name }));
+  const playlists = [
+    { id: SPOTIFY_LIBRARY_TRACKS_ID, name: "All Library Songs" },
+    ...pls.map(p => ({ id: p.id, name: p.name })),
+  ];
 
   // load tracks for selected playlist id (caller may call loadSpotifyTracks)
   return { playlists };
 }
 
 export async function loadSpotifyTracks(playlistId) {
-  localStorage.setItem("syncsong:lastSpotifyPlaylistId", String(playlistId));
+  return loadSpotifyTracksProgressive(playlistId);
+}
 
-  const items = await spotifyFetchAllPages(`/playlists/${playlistId}/tracks?limit=100`);
+export async function loadSpotifyTracksProgressive(playlistId, { onChunk } = {}) {
+  const selectedId = String(playlistId);
+  if (selectedId !== SPOTIFY_LIBRARY_TRACKS_ID) {
+    localStorage.setItem("syncsong:lastSpotifyPlaylistId", selectedId);
+  }
 
-  const tracks = items
-    .map(it => it.track)
-    .filter(Boolean)
-    .map(t => ({
-      id: cryptoRandomId(),
-      source: "spotify",
-      title: t.name,
-      artist: t.artists?.[0]?.name || "Unknown",
-      album: t.album?.name || "",
-      durationMs: t.duration_ms || 0,
-      spotifyTrackId: t.id,
-      spotifyUri: t.uri,
-      //spotifyUrl: t.external_urls?.spotify || (t.id ? `https://open.spotify.com/track/${t.id}` : ""),
-      artworkUrl: t.album?.images?.[0]?.url || "",
+  if (selectedId === SPOTIFY_LIBRARY_TRACKS_ID && spotifyLibraryTracksCache?.length) {
+    if (typeof onChunk === "function") {
+      onChunk({
+        tracks: spotifyLibraryTracksCache.slice(),
+        total: spotifyLibraryTracksCache.length,
+        page: 0,
+        done: true,
+      });
+    }
+    return { tracks: spotifyLibraryTracksCache.slice() };
+  }
 
-    }));
+  let path =
+    selectedId === SPOTIFY_LIBRARY_TRACKS_ID
+      ? "/me/tracks?limit=50"
+      : `/playlists/${playlistId}/tracks?limit=100`;
+  const tracks = [];
+  let page = 0;
+
+  while (path) {
+    const data = await spotifyFetch(path);
+    const mapped = mapSpotifyItemsToTracks(data?.items || []);
+    if (mapped.length) {
+      tracks.push(...mapped);
+      if (typeof onChunk === "function") {
+        onChunk({ tracks: tracks.slice(), total: tracks.length, page, done: false });
+      }
+    }
+    path = spotifyPathFromNext(data?.next);
+    page += 1;
+  }
+
+  if (selectedId === SPOTIFY_LIBRARY_TRACKS_ID) {
+    spotifyLibraryTracksCache = tracks.slice();
+  }
+
+  if (typeof onChunk === "function") {
+    onChunk({ tracks: tracks.slice(), total: tracks.length, page, done: true });
+  }
 
   return { tracks };
+}
+
+export async function searchSpotifyLibrarySongs(term, { limit = 25 } = {}) {
+  const q = String(term || "").trim();
+  if (!q) return { tracks: [] };
+
+  const safeLimit = Math.max(1, Math.min(50, Number(limit) || 25));
+  const res = await spotifyFetch(
+    `/search?type=track&limit=${safeLimit}&q=${encodeURIComponent(q)}`
+  );
+  const candidates = res?.tracks?.items || [];
+  if (!candidates.length) return { tracks: [] };
+
+  const ids = candidates.map(t => t?.id).filter(Boolean);
+  if (!ids.length) return { tracks: [] };
+
+  const savedMask = await spotifyFetch(`/me/tracks/contains?ids=${ids.join(",")}`);
+  const savedOnly = candidates.filter((_, i) => !!savedMask?.[i]);
+
+  return { tracks: mapSpotifyItemsToTracks(savedOnly) };
 }
 
 export async function spotifyFindUriForTrack(track) {
@@ -413,6 +483,7 @@ export async function spotifyWebConnect() {
   const scopes = [
     "playlist-read-private",
     "playlist-read-collaborative",
+    "user-library-read",
 
     // Web Playback SDK required
     "streaming",

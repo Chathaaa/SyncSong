@@ -1,4 +1,4 @@
-// Renderer-side Apple Music helpers (extracted from app.js)
+﻿// Renderer-side Apple Music helpers (extracted from app.js)
 // Exports: APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken,
 // ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized,
 // appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext, appleSetVolume
@@ -7,6 +7,7 @@ let wiredForInstance = null;
 let appleState = { isPlaying: false, positionMs: 0, durationMs: 0 };
 let appleWired = false;
 let applePlayInFlight = null;
+const APPLE_LIBRARY_TRACKS_ID = "__apple_library_tracks__";
 
 
 export const APPLE_DEV_TOKEN_URL = "https://syncsong-2lxp.onrender.com/apple/dev-token";
@@ -109,7 +110,7 @@ export const appleCatalogIdCache = new Map(); // key: sourceId -> catalogSongId
 export async function appleEnsureAuthorized() {
   await ensureAppleConfigured();
 
-  // ✅ Always grab the live instance (don’t rely on a cached object)
+  // âœ… Always grab the live instance (donâ€™t rely on a cached object)
   const mk = window.MusicKit.getInstance();
 
   if (!getAppleUserToken()) {
@@ -117,7 +118,7 @@ export async function appleEnsureAuthorized() {
     localStorage.setItem("syncsong:appleUserToken", userToken);
   }
 
-  // ✅ Re-wire if instance changed
+  // âœ… Re-wire if instance changed
   if (wiredForInstance !== mk) {
     wiredForInstance = mk;
     appleWired = false;       // allow wiring again
@@ -315,25 +316,23 @@ export async function loadApplePlaylistsAndTracks() {
   await ensureAppleConfigured();
 
   if (!getAppleUserToken()) {
-    return { playlists: [], tracks: [], note: "Sign in with Apple Music to load your library playlists." };
+    return { playlists: [], tracks: [], note: "Sign in with Apple Music to load your library." };
   }
 
   const pls = await appleFetchAllPages("/me/library/playlists?limit=100");
 
-  const playlists = pls.map(p => ({ id: p.id, name: p.attributes?.name || "Untitled" }));
+  const playlists = [
+    { id: APPLE_LIBRARY_TRACKS_ID, name: "All Library Songs" },
+    ...pls.map(p => ({ id: p.id, name: p.attributes?.name || "Untitled" })),
+  ];
   return { playlists };
 }
 
-export async function loadAppleTracks(playlistId) {
-  localStorage.setItem("syncsong:lastApplePlaylistId", String(playlistId));
-
-  const items = await appleFetchAllPages(`/me/library/playlists/${playlistId}/tracks?limit=100`);
-
+function mapAppleLibraryItemsToTracks(items) {
   function appleFallbackUrlFromTrack(t) {
     const name = t.attributes?.name || "";
     const artist = t.attributes?.artistName || "";
     const q = encodeURIComponent(`${name} ${artist}`.trim());
-    // Always works even when library track has no url
     return q ? `https://music.apple.com/search?term=${q}` : "";
   }
 
@@ -341,7 +340,7 @@ export async function loadAppleTracks(playlistId) {
     return Math.random().toString(16).slice(2) + Date.now().toString(16);
   }
 
-  const tracks = items.map(t => {
+  return items.map(t => {
     const directUrl = t.attributes?.url || "";
     const art = t.attributes?.artwork;
     const artworkUrl = art
@@ -356,17 +355,72 @@ export async function loadAppleTracks(playlistId) {
       artist: t.attributes?.artistName || "Unknown",
       album: t.attributes?.albumName || "",
       durationMs: t.attributes?.durationInMillis || 0,
-
-      // ✅ prefer API url, otherwise fall back to a search URL
       url: directUrl || appleFallbackUrlFromTrack(t),
-
-      catalogId: "", // <-- we will resolve this when we need to play
-
+      catalogId: "",
       artworkUrl,
     };
   });
+}
+
+export async function loadAppleTracksProgressive(playlistId, { onChunk } = {}) {
+  const selectedId = String(playlistId);
+  if (selectedId !== APPLE_LIBRARY_TRACKS_ID) {
+    localStorage.setItem("syncsong:lastApplePlaylistId", selectedId);
+  }
+
+  let path =
+    selectedId === APPLE_LIBRARY_TRACKS_ID
+      ? "/me/library/songs?limit=100"
+      : `/me/library/playlists/${playlistId}/tracks?limit=100`;
+  const tracks = [];
+  let page = 0;
+
+  while (path) {
+    const data = await appleFetch(path);
+    const mapped = mapAppleLibraryItemsToTracks(data?.data || []);
+    if (mapped.length) {
+      tracks.push(...mapped);
+      if (typeof onChunk === "function") {
+        onChunk({ tracks: tracks.slice(), total: tracks.length, page, done: false });
+      }
+    }
+    path = applePathFromNext(data?.next);
+    page += 1;
+  }
+
+  if (typeof onChunk === "function") {
+    onChunk({ tracks: tracks.slice(), total: tracks.length, page, done: true });
+  }
 
   return { tracks };
+}
+
+export async function loadAppleTracks(playlistId) {
+  return loadAppleTracksProgressive(playlistId);
+}
+
+export async function searchAppleLibrarySongs(term, { limit = 100 } = {}) {
+  const q = String(term || "").trim();
+  if (!q) return { tracks: [] };
+
+  // Apple library search is strict about supported types/limits.
+  // Prefer the broadly supported songs type with conservative limit.
+  const safeLimit = Math.max(1, Math.min(25, Number(limit) || 25));
+  let data;
+  try {
+    data = await appleFetch(
+      `/me/library/search?types=songs&term=${encodeURIComponent(q)}&limit=${safeLimit}`
+    );
+  } catch (e) {
+    // Fallback for storefront/account variants that expect library-songs.
+    data = await appleFetch(
+      `/me/library/search?types=library-songs&term=${encodeURIComponent(q)}&limit=${safeLimit}`
+    );
+  }
+
+  const items = data?.results?.songs?.data || data?.results?.["library-songs"]?.data || [];
+
+  return { tracks: mapAppleLibraryItemsToTracks(items) };
 }
 
 export async function appleSeek(seconds) {
@@ -453,4 +507,5 @@ function wireAppleEvents(mk) {
     }
   });
 }
+
 
