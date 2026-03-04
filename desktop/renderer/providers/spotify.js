@@ -73,7 +73,7 @@ function cryptoRandomId() {
 
 function mapSpotifyItemsToTracks(items) {
   return items
-    .map(it => it?.track || it)
+    .map(it => it?.item || it?.track || it)
     .filter(Boolean)
     .map(t => ({
       id: cryptoRandomId(),
@@ -381,7 +381,7 @@ export async function loadSpotifyTracksProgressive(playlistId, { onChunk } = {})
   let path =
     selectedId === SPOTIFY_LIBRARY_TRACKS_ID
       ? "/me/tracks?limit=50"
-      : `/playlists/${playlistId}/tracks?limit=100`;
+      : `/playlists/${playlistId}/items?limit=100`;
   const tracks = [];
   let page = 0;
 
@@ -568,3 +568,4 @@ export async function spotifyDuckForTransition(ms = 450) {
     }, ms);
   } catch {}
 }
+

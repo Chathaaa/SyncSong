@@ -1,1 +1,52 @@
-import"./modulepreload-polyfill-B5Qt9EMX.js";const o=new URLSearchParams(location.search),s=o.get("code"),c=o.get("error"),p=o.get("state");try{if(c)throw new Error(c);if(!s)throw new Error("Missing code");const e=localStorage.getItem("spotify:pkce_verifier"),r=localStorage.getItem("spotify:client_id"),n=localStorage.getItem("spotify:redirect_uri"),i=localStorage.getItem("spotify:oauth_state");if(!e||!r||!n)throw new Error("Missing PKCE session values (open Connect Spotify again).");if(i&&p!==i)throw new Error("State mismatch. Please try connecting again.");const a=await fetch("https://accounts.spotify.com/api/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({client_id:r,grant_type:"authorization_code",code:s,redirect_uri:n,code_verifier:e})}),t=await a.json();if(!a.ok)throw new Error(t?.error_description||"Token exchange failed");localStorage.setItem("spotify:access_token",t.access_token||""),localStorage.setItem("spotify:refresh_token",t.refresh_token||""),localStorage.setItem("spotify:expires_at",String(Date.now()+(t.expires_in||0)*1e3)),window.opener?.postMessage({type:"spotify:token",token:t},"*"),document.body.innerHTML="<h3>Spotify connected. You can close this window.</h3>"}catch(e){document.body.innerHTML=`<h3>Spotify auth failed: ${String(e?.message||e)}</h3>`}
+import "./modulepreload-polyfill-B5Qt9EMX.js";
+
+const params = new URLSearchParams(location.search);
+const code = params.get("code");
+const error = params.get("error");
+const returnedState = params.get("state");
+
+const message = document.createElement("h3");
+document.body.appendChild(message);
+
+try {
+  if (error) throw new Error(error);
+  if (!code) throw new Error("Missing code");
+
+  const verifier = localStorage.getItem("spotify:pkce_verifier");
+  const clientId = localStorage.getItem("spotify:client_id");
+  const redirectUri = localStorage.getItem("spotify:redirect_uri");
+  const expectedState = localStorage.getItem("spotify:oauth_state");
+
+  if (!verifier || !clientId || !redirectUri) {
+    throw new Error("Missing PKCE session values (open Connect Spotify again).");
+  }
+  if (expectedState && returnedState !== expectedState) {
+    throw new Error("State mismatch. Please try connecting again.");
+  }
+
+  const tokenRes = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+    }),
+  });
+
+  const tok = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error(tok?.error_description || "Token exchange failed");
+
+  localStorage.setItem("spotify:access_token", tok.access_token || "");
+  localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
+  localStorage.setItem("spotify:expires_at", String(Date.now() + (tok.expires_in || 0) * 1000));
+
+  const openerOrigin = window.location.origin;
+  window.opener?.postMessage({ type: "spotify:token", token: tok }, openerOrigin);
+
+  message.textContent = "Spotify connected. You can close this window.";
+} catch (e) {
+  message.textContent = `Spotify auth failed: ${String(e?.message || e)}`;
+}
