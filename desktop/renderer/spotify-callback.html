@@ -11,6 +11,9 @@
       const error = params.get("error");
       const returnedState = params.get("state");
 
+      const message = document.createElement("h3");
+      document.body.appendChild(message);
+
       try {
         if (error) throw new Error(error);
         if (!code) throw new Error("Missing code");
@@ -42,17 +45,16 @@
         const tok = await tokenRes.json();
         if (!tokenRes.ok) throw new Error(tok?.error_description || "Token exchange failed");
 
-        // Optional: store here too (useful when same-origin)
         localStorage.setItem("spotify:access_token", tok.access_token || "");
         localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
         localStorage.setItem("spotify:expires_at", String(Date.now() + (tok.expires_in || 0) * 1000));
 
-        // Send to opener (main app)
-        window.opener?.postMessage({ type: "spotify:token", token: tok }, "*");
+        const openerOrigin = window.location.origin;
+        window.opener?.postMessage({ type: "spotify:token", token: tok }, openerOrigin);
 
-        document.body.innerHTML = "<h3>Spotify connected. You can close this window.</h3>";
+        message.textContent = "Spotify connected. You can close this window.";
       } catch (e) {
-        document.body.innerHTML = `<h3>Spotify auth failed: ${String(e?.message || e)}</h3>`;
+        message.textContent = `Spotify auth failed: ${String(e?.message || e)}`;
       }
     </script>
 
