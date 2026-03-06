@@ -10,6 +10,7 @@ const IS_DISCORD_ACTIVITY_CONTEXT = (() => {
 const WS_URL = IS_DISCORD_ACTIVITY_CONTEXT
   ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`
   : "wss://syncsong-2lxp.onrender.com";
+const API_BASE = IS_DISCORD_ACTIVITY_CONTEXT ? "/api" : "";
 
 // Import renderer-side providers (keeps app.js slim)
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
@@ -39,6 +40,7 @@ let discordActivity = {
   context: null,
   error: "",
 };
+let linkedProvidersHydrated = false;
 
 let queue = [];
 let nowPlaying = null;
@@ -145,6 +147,85 @@ function send(type, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify({ type, payload }));
   return true;
+}
+
+async function discordAuthedFetch(path, init = {}) {
+  const tok = String(discordActivity?.token || "").trim();
+  if (!tok) throw new Error("Discord activity token is missing.");
+  const headers = {
+    ...(init.headers || {}),
+    Authorization: `Bearer ${tok}`,
+  };
+  return fetch(`${API_BASE}${path}`, { ...init, headers });
+}
+
+async function hydrateProvidersFromDiscordLink() {
+  if (!discordActivity?.enabled || !discordActivity?.token || linkedProvidersHydrated) return;
+
+  try {
+    const res = await discordAuthedFetch("/discord/providers/me");
+    if (!res.ok) return;
+    const data = await res.json().catch(() => ({}));
+
+    const sp = data?.spotify || {};
+    if (sp?.connected) {
+      const localRefresh = localStorage.getItem("spotify:refresh_token") || "";
+      const localAccess = localStorage.getItem("spotify:access_token") || "";
+      if (!localRefresh && !localAccess) {
+        if (sp.accessToken) localStorage.setItem("spotify:access_token", String(sp.accessToken));
+        if (sp.refreshToken) localStorage.setItem("spotify:refresh_token", String(sp.refreshToken));
+        if (sp.expiresAt) localStorage.setItem("spotify:expires_at", String(Number(sp.expiresAt) || 0));
+        if (sp.clientId) localStorage.setItem("spotify:client_id", String(sp.clientId));
+      }
+    }
+
+    const ap = data?.apple || {};
+    if (ap?.connected) {
+      const localAppleToken = localStorage.getItem(APPLE_USER_TOKEN_KEY) || "";
+      if (!localAppleToken && ap.userToken) {
+        localStorage.setItem(APPLE_USER_TOKEN_KEY, String(ap.userToken));
+      }
+    }
+
+    linkedProvidersHydrated = true;
+  } catch {
+    // Best-effort only.
+  }
+}
+
+async function syncLocalProvidersToDiscordLink() {
+  if (!discordActivity?.enabled || !discordActivity?.token) return;
+
+  const spotifyRefresh = localStorage.getItem("spotify:refresh_token") || "";
+  const spotifyAccess = localStorage.getItem("spotify:access_token") || "";
+  const spotifyClientId = localStorage.getItem("spotify:client_id") || "";
+  const spotifyExpiresAt = Number(localStorage.getItem("spotify:expires_at") || "0") || 0;
+  const appleUserToken = localStorage.getItem(APPLE_USER_TOKEN_KEY) || "";
+
+  if (!spotifyRefresh && !spotifyAccess && !appleUserToken) return;
+
+  const body = {};
+  if (spotifyRefresh || spotifyAccess) {
+    body.spotify = {
+      refreshToken: spotifyRefresh,
+      accessToken: spotifyAccess,
+      clientId: spotifyClientId,
+      expiresAt: spotifyExpiresAt,
+    };
+  }
+  if (appleUserToken) {
+    body.apple = { userToken: appleUserToken };
+  }
+
+  try {
+    await discordAuthedFetch("/discord/providers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // Best-effort only.
+  }
 }
 
 function escapeHtml(s) {
@@ -2307,6 +2388,7 @@ function wireUi() {
         if (rt) {
           await spotifyEnsureAccessToken();
           el("sessionMeta").textContent = "Spotify connected!";
+          await syncLocalProvidersToDiscordLink();
           await switchPlaybackSource("spotify");
           await reloadMusic();
           renderConnectPrompt();
@@ -2331,6 +2413,7 @@ function wireUi() {
         await spotifyFetch("/me"); // forces allowlist/premium issues to show immediately
         
         el("sessionMeta").textContent = "Spotify connected!";
+        await syncLocalProvidersToDiscordLink();
         await switchPlaybackSource("spotify");
         await reloadMusic();
         renderConnectPrompt();
@@ -2353,6 +2436,7 @@ function wireUi() {
       const userToken = await mk.authorize(); // triggers Apple sign-in
       localStorage.setItem(APPLE_USER_TOKEN_KEY, userToken);
       el("sessionMeta").textContent = "Apple Music connected!";
+      await syncLocalProvidersToDiscordLink();
       await switchPlaybackSource("apple");
       await reloadMusic();
       renderConnectPrompt();
@@ -2470,6 +2554,8 @@ document.addEventListener("visibilitychange", () => {
       el("sessionMeta").textContent = discordActivity.error;
     } else {
       el("sessionMeta").textContent = "Discord Activity mode enabled.";
+      await hydrateProvidersFromDiscordLink();
+      await syncLocalProvidersToDiscordLink();
     }
   }
 

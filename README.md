@@ -98,6 +98,10 @@ Discord Activity notes:
 - Activity client auth flow now uses Discord Embedded App SDK (`authorize`) and backend OAuth code exchange at `/discord/activity/oauth/token`.
 - Production path expects a Discord bearer token (Authorization header) that the server verifies via Discord API.
 - Sessions are now bound to Discord `activityInstanceId`; other participants in the same Activity can auto-join via WebSocket (`session:autoJoinActivity`).
+- Activity clients can sync linked provider tokens via:
+  - `POST /discord/providers`
+  - `GET /discord/providers/me`
+  This currently uses in-memory server storage (non-persistent).
 
 Frontend env:
 - `VITE_DISCORD_CLIENT_ID` (required for Embedded App SDK initialization in the web client)

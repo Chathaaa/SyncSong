@@ -184,6 +184,7 @@ async function getAppleDevToken() {
 const sessions = new Map(); // sessionId -> session
 const activityInstanceToSession = new Map(); // activityInstanceId -> sessionId
 const sessionToActivityInstance = new Map(); // sessionId -> activityInstanceId
+const discordProviderLinks = new Map(); // discordUserId -> { spotify?: {...}, apple?: {...}, updatedAt:number }
 
 const uid = () => crypto.randomBytes(8).toString("hex");
 const makeSessionId = () => crypto.randomBytes(3).toString("hex").toUpperCase();
@@ -366,6 +367,30 @@ async function verifyDiscordBearerIdentity(accessToken) {
     discordUserId,
     profileName,
     applicationId: appId,
+  };
+}
+
+async function resolveDiscordIdentityFromHttpRequest(req) {
+  const bearer = parseBearerToken(req);
+  if (!bearer) throw new Error("missing_authorization_bearer");
+
+  // First try SyncSong-issued activity JWT.
+  try {
+    const verified = await verifyDiscordActivityToken(bearer);
+    return {
+      discordUserId: verified.discordUserId,
+      displayName: verified.displayName,
+      source: "syncsong_activity_jwt",
+    };
+  } catch {
+    // Fall through to Discord OAuth bearer verification.
+  }
+
+  const verified = await verifyDiscordBearerIdentity(bearer);
+  return {
+    discordUserId: verified.discordUserId,
+    displayName: verified.profileName,
+    source: "discord_oauth_bearer",
   };
 }
 
@@ -568,6 +593,113 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       json(req, res, 500, { ok: false, error: "discord_activity_token_failed", message: msg });
+    }
+    return;
+  }
+
+  // SyncSong: save linked provider auth for a Discord user.
+  if (req.method === "POST" && req.url === "/discord/providers") {
+    try {
+      const identity = await resolveDiscordIdentityFromHttpRequest(req);
+      const body = await readJsonBody(req, { maxBytes: 200_000 });
+
+      const current = discordProviderLinks.get(identity.discordUserId) || { updatedAt: Date.now() };
+      const next = { ...current, updatedAt: Date.now() };
+
+      const spotify = body?.spotify;
+      if (spotify && typeof spotify === "object") {
+        const accessToken = String(spotify?.accessToken || "").trim();
+        const refreshToken = String(spotify?.refreshToken || "").trim();
+        const clientId = String(spotify?.clientId || "").trim();
+        const expiresAt = Number(spotify?.expiresAt || 0) || 0;
+        if (accessToken || refreshToken) {
+          next.spotify = {
+            accessToken: accessToken.slice(0, 4096),
+            refreshToken: refreshToken.slice(0, 4096),
+            clientId: clientId.slice(0, 128),
+            expiresAt,
+            updatedAt: Date.now(),
+          };
+        }
+      }
+
+      const apple = body?.apple;
+      if (apple && typeof apple === "object") {
+        const userToken = String(apple?.userToken || "").trim();
+        if (userToken) {
+          next.apple = {
+            userToken: userToken.slice(0, 4096),
+            updatedAt: Date.now(),
+          };
+        }
+      }
+
+      discordProviderLinks.set(identity.discordUserId, next);
+      json(req, res, 200, { ok: true });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === "invalid_json") {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+      if (msg === "payload_too_large") {
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        return;
+      }
+      if (
+        msg === "missing_authorization_bearer" ||
+        msg === "missing_discord_access_token" ||
+        msg === "discord_missing_user_id" ||
+        msg === "discord_application_mismatch" ||
+        msg.startsWith("discord_api_error:")
+      ) {
+        json(req, res, 401, { ok: false, error: "unauthorized", message: msg });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_provider_link_failed", message: msg });
+    }
+    return;
+  }
+
+  // SyncSong: fetch linked provider auth for current Discord user.
+  if (req.method === "GET" && req.url === "/discord/providers/me") {
+    try {
+      const identity = await resolveDiscordIdentityFromHttpRequest(req);
+      const linked = discordProviderLinks.get(identity.discordUserId) || null;
+
+      json(req, res, 200, {
+        ok: true,
+        spotify: linked?.spotify
+          ? {
+              connected: true,
+              accessToken: linked.spotify.accessToken || "",
+              refreshToken: linked.spotify.refreshToken || "",
+              clientId: linked.spotify.clientId || "",
+              expiresAt: Number(linked.spotify.expiresAt || 0),
+              updatedAt: Number(linked.spotify.updatedAt || 0),
+            }
+          : { connected: false },
+        apple: linked?.apple
+          ? {
+              connected: true,
+              userToken: linked.apple.userToken || "",
+              updatedAt: Number(linked.apple.updatedAt || 0),
+            }
+          : { connected: false },
+      });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (
+        msg === "missing_authorization_bearer" ||
+        msg === "missing_discord_access_token" ||
+        msg === "discord_missing_user_id" ||
+        msg === "discord_application_mismatch" ||
+        msg.startsWith("discord_api_error:")
+      ) {
+        json(req, res, 401, { ok: false, error: "unauthorized", message: msg });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_provider_fetch_failed", message: msg });
     }
     return;
   }
