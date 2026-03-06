@@ -50,9 +50,14 @@
         localStorage.setItem("spotify:expires_at", String(Date.now() + (tok.expires_in || 0) * 1000));
 
         const openerOrigin = window.location.origin;
-        window.opener?.postMessage({ type: "spotify:token", token: tok }, openerOrigin);
-
-        message.textContent = "Spotify connected. You can close this window.";
+        if (window.opener) {
+          window.opener.postMessage({ type: "spotify:token", token: tok }, openerOrigin);
+          message.textContent = "Spotify connected. You can close this window.";
+        } else {
+          const returnTo = localStorage.getItem("spotify:return_to") || `${window.location.origin}/`;
+          message.textContent = "Spotify connected. Returning to SyncSong...";
+          setTimeout(() => window.location.replace(returnTo), 250);
+        }
       } catch (e) {
         message.textContent = `Spotify auth failed: ${String(e?.message || e)}`;
       }

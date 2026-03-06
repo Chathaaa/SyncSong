@@ -2317,7 +2317,12 @@ function wireUi() {
 
       // Web path
       el("sessionMeta").textContent = "Opening Spotify authorization...";
-      await import("./providers/spotify.js").then((m) => m.spotifyWebConnect());
+      await import("./providers/spotify.js").then((m) => m.spotifyWebConnect({
+        useRedirect: !!IS_DISCORD_ACTIVITY_CONTEXT,
+      }));
+
+      // In Discord Activity mode we use full-page redirect OAuth; this page will unload.
+      if (IS_DISCORD_ACTIVITY_CONTEXT) return;
 
       // IMPORTANT: wait for callback to store token before using Spotify API
       await waitForSpotifyToken();
@@ -2353,7 +2358,13 @@ function wireUi() {
       renderConnectPrompt();
       renderConnectButtons();
     } catch (e) {
-      el("sessionMeta").textContent = "Apple connect failed: " + (e?.message || String(e));
+      const base = "Apple connect failed: " + (e?.message || String(e));
+      if (IS_DISCORD_ACTIVITY_CONTEXT) {
+        el("sessionMeta").textContent =
+          `${base} In Discord Activity, Apple sign-in may be blocked by embedded popup restrictions.`;
+      } else {
+        el("sessionMeta").textContent = base;
+      }
     }
   });
 
