@@ -77,7 +77,6 @@ async function getAccessTokenFromSdk(ctx, apiBase) {
     state: randomState(),
     prompt: "none",
     scope: ["identify", "guilds"],
-    redirect_uri: redirectUri,
   });
 
   const oauth = await exchangeDiscordOauthCode(String(authz?.code || ""), apiBase, redirectUri);
