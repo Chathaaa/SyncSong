@@ -8,6 +8,7 @@
     "preview": "vite preview --host 0.0.0.0 --port 4173"
   },
   "dependencies": {
+    "@discord/embedded-app-sdk": "^1.8.0",
     "@vercel/analytics": "^1.6.1",
     "jose": "^6.1.3"
   },

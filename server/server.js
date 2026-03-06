@@ -5,7 +5,7 @@ import https from "node:https";
 import crypto from "node:crypto";
 import { URL } from "node:url";
 import { WebSocketServer } from "ws";
-import { SignJWT, importPKCS8 } from "jose";
+import { SignJWT, importPKCS8, jwtVerify } from "jose";
 
 const PORT = process.env.PORT || 3000;
 
@@ -182,9 +182,192 @@ async function getAppleDevToken() {
    ========================================================= */
 
 const sessions = new Map(); // sessionId -> session
+const activityInstanceToSession = new Map(); // activityInstanceId -> sessionId
+const sessionToActivityInstance = new Map(); // sessionId -> activityInstanceId
 
 const uid = () => crypto.randomBytes(8).toString("hex");
 const makeSessionId = () => crypto.randomBytes(3).toString("hex").toUpperCase();
+const DISCORD_ACTIVITY_JWT_SECRET = String(process.env.DISCORD_ACTIVITY_JWT_SECRET || "");
+const DISCORD_ACTIVITY_ALLOW_INSECURE_DEV = String(process.env.DISCORD_ACTIVITY_ALLOW_INSECURE_DEV || "") === "1";
+const DISCORD_APPLICATION_ID = String(process.env.DISCORD_APPLICATION_ID || "").trim();
+const DISCORD_CLIENT_ID = String(process.env.DISCORD_CLIENT_ID || DISCORD_APPLICATION_ID || "").trim();
+const DISCORD_CLIENT_SECRET = String(process.env.DISCORD_CLIENT_SECRET || "").trim();
+const DISCORD_OAUTH_REDIRECT_URI = String(process.env.DISCORD_OAUTH_REDIRECT_URI || "").trim();
+
+function hasDiscordActivityAuthConfig() {
+  return DISCORD_ACTIVITY_JWT_SECRET.length >= 16;
+}
+
+function getDiscordActivityKey() {
+  return new TextEncoder().encode(DISCORD_ACTIVITY_JWT_SECRET);
+}
+
+async function signDiscordActivityToken(claims) {
+  if (!hasDiscordActivityAuthConfig()) {
+    throw new Error("Missing or weak DISCORD_ACTIVITY_JWT_SECRET");
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT(claims)
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt(now)
+    .setExpirationTime(now + (12 * 60 * 60)) // 12h
+    .setIssuer("syncsong")
+    .setAudience("syncsong-discord-activity")
+    .sign(getDiscordActivityKey());
+}
+
+async function verifyDiscordActivityToken(token) {
+  if (!hasDiscordActivityAuthConfig()) {
+    throw new Error("DISCORD_ACTIVITY_JWT_SECRET is not configured");
+  }
+
+  const { payload } = await jwtVerify(String(token || ""), getDiscordActivityKey(), {
+    issuer: "syncsong",
+    audience: "syncsong-discord-activity",
+  });
+
+  const sub = String(payload.sub || "").trim();
+  if (!sub) throw new Error("Missing token subject");
+
+  return {
+    discordUserId: sub,
+    displayName: String(payload.displayName || "Guest").slice(0, 32),
+    guildId: String(payload.guildId || ""),
+    channelId: String(payload.channelId || ""),
+    activityInstanceId: String(payload.activityInstanceId || ""),
+  };
+}
+
+function readJsonBody(req, { maxBytes = 1e6 } = {}) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > maxBytes) {
+        reject(new Error("payload_too_large"));
+        req.socket.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      try {
+        resolve(JSON.parse(body || "{}"));
+      } catch {
+        reject(new Error("invalid_json"));
+      }
+    });
+
+    req.on("error", (err) => reject(err));
+  });
+}
+
+function parseBearerToken(req) {
+  const header = String(req?.headers?.authorization || "").trim();
+  if (!header) return "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  return m ? String(m[1] || "").trim() : "";
+}
+
+function discordApiGetJson(path, accessToken) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`https://discord.com/api/v10${path}`);
+    const req = https.request(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        let parsed = {};
+        try {
+          parsed = JSON.parse(body || "{}");
+        } catch {
+          reject(new Error(`discord_invalid_json:${path}`));
+          return;
+        }
+
+        const status = Number(res.statusCode || 0);
+        if (status >= 200 && status < 300) {
+          resolve(parsed);
+          return;
+        }
+
+        const err = String(parsed?.message || `discord_http_${status}`);
+        reject(new Error(`discord_api_error:${path}:${status}:${err}`));
+      });
+    });
+
+    req.on("error", (err) => reject(new Error(`discord_network_error:${err?.message || String(err)}`)));
+    req.end();
+  });
+}
+
+function discordApiPostForm(path, form) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`https://discord.com/api/v10${path}`);
+    const body = new URLSearchParams(form).toString();
+    const req = https.request(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        let parsed = {};
+        try {
+          parsed = JSON.parse(data || "{}");
+        } catch {
+          reject(new Error(`discord_invalid_json:${path}`));
+          return;
+        }
+
+        const status = Number(res.statusCode || 0);
+        if (status >= 200 && status < 300) {
+          resolve(parsed);
+          return;
+        }
+
+        const err = String(parsed?.error_description || parsed?.message || `discord_http_${status}`);
+        reject(new Error(`discord_api_error:${path}:${status}:${err}`));
+      });
+    });
+
+    req.on("error", (err) => reject(new Error(`discord_network_error:${err?.message || String(err)}`)));
+    req.write(body);
+    req.end();
+  });
+}
+
+async function verifyDiscordBearerIdentity(accessToken) {
+  if (!accessToken) throw new Error("missing_discord_access_token");
+
+  const [me, oauth] = await Promise.all([
+    discordApiGetJson("/users/@me", accessToken),
+    discordApiGetJson("/oauth2/@me", accessToken),
+  ]);
+
+  const discordUserId = String(me?.id || "").trim();
+  if (!discordUserId) throw new Error("discord_missing_user_id");
+
+  const appId = String(oauth?.application?.id || "").trim();
+  if (DISCORD_APPLICATION_ID && appId && appId !== DISCORD_APPLICATION_ID) {
+    throw new Error("discord_application_mismatch");
+  }
+
+  const profileName = String(me?.global_name || me?.username || "").trim().slice(0, 32);
+  return {
+    discordUserId,
+    profileName,
+    applicationId: appId,
+  };
+}
 
 function safeSend(ws, obj) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
@@ -206,6 +389,27 @@ function state(sessionId, session) {
     queue: session.queue,
     nowPlaying: session.nowPlaying || null,
   };
+}
+
+function bindActivitySession(activityInstanceId, sessionId) {
+  const aid = String(activityInstanceId || "").trim();
+  if (!aid || !sessionId) return;
+
+  const prevSessionId = activityInstanceToSession.get(aid);
+  if (prevSessionId && prevSessionId !== sessionId) {
+    sessionToActivityInstance.delete(prevSessionId);
+  }
+
+  activityInstanceToSession.set(aid, sessionId);
+  sessionToActivityInstance.set(sessionId, aid);
+}
+
+function unbindActivitySessionBySessionId(sessionId) {
+  const aid = sessionToActivityInstance.get(sessionId);
+  if (!aid) return;
+  sessionToActivityInstance.delete(sessionId);
+  const current = activityInstanceToSession.get(aid);
+  if (current === sessionId) activityInstanceToSession.delete(aid);
 }
 
 /* =========================================================
@@ -234,6 +438,136 @@ const server = http.createServer(async (req, res) => {
       json(req, res, 200, { token, exp: expMs });
     } catch (e) {
       json(req, res, 500, { error: e?.message || String(e) });
+    }
+    return;
+  }
+
+  // SyncSong: Discord Activity auth -> SyncSong JWT
+  if (req.method === "POST" && req.url === "/discord/activity/oauth/token") {
+    try {
+      const body = await readJsonBody(req, { maxBytes: 50_000 });
+      const code = String(body?.code || "").trim();
+
+      if (!code) {
+        json(req, res, 400, { ok: false, error: "missing_oauth_code" });
+        return;
+      }
+      if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
+        json(req, res, 503, {
+          ok: false,
+          error: "discord_oauth_not_configured",
+          message: "Set DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET.",
+        });
+        return;
+      }
+
+      const form = {
+        grant_type: "authorization_code",
+        code,
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+      };
+      if (DISCORD_OAUTH_REDIRECT_URI) form.redirect_uri = DISCORD_OAUTH_REDIRECT_URI;
+
+      const token = await discordApiPostForm("/oauth2/token", form);
+      const accessToken = String(token?.access_token || "").trim();
+      if (!accessToken) {
+        json(req, res, 502, { ok: false, error: "discord_missing_access_token" });
+        return;
+      }
+
+      json(req, res, 200, {
+        ok: true,
+        access_token: accessToken,
+        token_type: String(token?.token_type || "Bearer"),
+        expires_in: Number(token?.expires_in || 0),
+        scope: String(token?.scope || ""),
+      });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === "invalid_json") {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+      if (msg === "payload_too_large") {
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_oauth_exchange_failed", message: msg });
+    }
+    return;
+  }
+
+  // SyncSong: Discord Activity auth -> SyncSong JWT
+  if (req.method === "POST" && req.url === "/discord/activity/token") {
+    try {
+      const body = await readJsonBody(req, { maxBytes: 50_000 });
+      const requestedDisplayName = String(body?.displayName || "Guest").trim().slice(0, 32);
+      const discordUserId = String(body?.discordUserId || "").trim();
+      const guildId = String(body?.guildId || "").trim();
+      const channelId = String(body?.channelId || "").trim();
+      const activityInstanceId = String(body?.activityInstanceId || "").trim();
+      const bearerToken = parseBearerToken(req);
+      const bodyAccessToken = String(body?.discordAccessToken || "").trim();
+      const discordAccessToken = bearerToken || bodyAccessToken;
+
+      if (!hasDiscordActivityAuthConfig()) {
+        json(req, res, 503, {
+          ok: false,
+          error: "discord_activity_not_configured",
+          message: "Set DISCORD_ACTIVITY_JWT_SECRET to enable Discord Activity auth.",
+        });
+        return;
+      }
+
+      let verifiedUserId = "";
+      let verifiedDisplayName = "";
+      let verificationSource = "discord_oauth";
+
+      if (discordAccessToken) {
+        const verified = await verifyDiscordBearerIdentity(discordAccessToken);
+        verifiedUserId = verified.discordUserId;
+        verifiedDisplayName = verified.profileName || requestedDisplayName || "Guest";
+      } else if (DISCORD_ACTIVITY_ALLOW_INSECURE_DEV) {
+        // Local bootstrap fallback only.
+        if (!discordUserId) {
+          json(req, res, 400, { ok: false, error: "missing_discord_user_id" });
+          return;
+        }
+        verifiedUserId = discordUserId;
+        verifiedDisplayName = requestedDisplayName || "Guest";
+        verificationSource = "insecure_dev";
+      } else {
+        json(req, res, 401, {
+          ok: false,
+          error: "missing_discord_access_token",
+          message: "Provide a Discord bearer token. For local testing only, set DISCORD_ACTIVITY_ALLOW_INSECURE_DEV=1.",
+        });
+        return;
+      }
+
+      const token = await signDiscordActivityToken({
+        sub: verifiedUserId,
+        displayName: verifiedDisplayName,
+        guildId,
+        channelId,
+        activityInstanceId,
+        source: "discord_activity",
+        verificationSource,
+      });
+
+      json(req, res, 200, { ok: true, token, expiresInSec: 12 * 60 * 60 });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === "invalid_json") {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+      if (msg === "payload_too_large") {
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_activity_token_failed", message: msg });
     }
     return;
   }
@@ -518,10 +852,11 @@ wssWatchParty.on("connection", (ws, req) => {
 wssSyncSong.on("connection", (ws) => {
   const userId = uid();
   let joinedSessionId = null;
+  let discordAuth = null;
 
   safeSend(ws, { type: "hello", userId });
 
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw.toString());
@@ -533,9 +868,31 @@ wssSyncSong.on("connection", (ws) => {
     const { type, payload } = msg || {};
     if (!type) return;
 
+    if (type === "auth:discordActivity") {
+      try {
+        const token = String(payload?.token || "");
+        if (!token) {
+          safeSend(ws, { type: "error", message: "Missing Discord activity token" });
+          return;
+        }
+
+        discordAuth = await verifyDiscordActivityToken(token);
+        safeSend(ws, {
+          type: "auth:ok",
+          provider: "discord_activity",
+          displayName: discordAuth.displayName,
+          discordUserId: discordAuth.discordUserId,
+        });
+      } catch (err) {
+        discordAuth = null;
+        safeSend(ws, { type: "error", message: `Discord auth failed: ${err?.message || String(err)}` });
+      }
+      return;
+    }
+
     if (type === "session:create") {
       const sessionId = makeSessionId();
-      const displayName = String(payload?.displayName || "Host").slice(0, 32);
+      const displayName = String(discordAuth?.displayName || payload?.displayName || "Host").slice(0, 32);
 
       const session = {
         hostUserId: userId,
@@ -549,6 +906,7 @@ wssSyncSong.on("connection", (ws) => {
       session.members.set(userId, { displayName, ws });
       sessions.set(sessionId, session);
       joinedSessionId = sessionId;
+      bindActivitySession(discordAuth?.activityInstanceId, sessionId);
 
       safeSend(ws, { type: "session:created", sessionId });
       broadcast(session, state(sessionId, session));
@@ -557,7 +915,7 @@ wssSyncSong.on("connection", (ws) => {
 
     if (type === "session:join") {
       const sessionId = String(payload?.sessionId || "").trim().toUpperCase();
-      const displayName = String(payload?.displayName || "Guest").slice(0, 32);
+      const displayName = String(discordAuth?.displayName || payload?.displayName || "Guest").slice(0, 32);
 
       const session = sessions.get(sessionId);
       if (!session) {
@@ -568,6 +926,29 @@ wssSyncSong.on("connection", (ws) => {
       session.members.set(userId, { displayName, ws });
       joinedSessionId = sessionId;
 
+      broadcast(session, state(sessionId, session));
+      return;
+    }
+
+    if (type === "session:autoJoinActivity") {
+      const activityInstanceId = String(discordAuth?.activityInstanceId || "").trim();
+      if (!activityInstanceId) {
+        safeSend(ws, { type: "session:autoJoin:miss", reason: "missing_activity_instance" });
+        return;
+      }
+
+      const sessionId = activityInstanceToSession.get(activityInstanceId);
+      const session = sessionId ? sessions.get(sessionId) : null;
+      if (!session || !sessionId) {
+        safeSend(ws, { type: "session:autoJoin:miss", reason: "no_active_session" });
+        return;
+      }
+
+      const displayName = String(discordAuth?.displayName || payload?.displayName || "Guest").slice(0, 32);
+      session.members.set(userId, { displayName, ws });
+      joinedSessionId = sessionId;
+
+      safeSend(ws, { type: "session:autoJoined", sessionId });
       broadcast(session, state(sessionId, session));
       return;
     }
@@ -764,11 +1145,16 @@ wssSyncSong.on("connection", (ws) => {
     if (session.hostUserId === userId) {
       broadcast(session, { type: "error", message: "Host disconnected. Session ended." });
       sessions.delete(joinedSessionId);
+      unbindActivitySessionBySessionId(joinedSessionId);
       return;
     }
 
-    if (session.members.size === 0) sessions.delete(joinedSessionId);
-    else broadcast(session, state(joinedSessionId, session));
+    if (session.members.size === 0) {
+      sessions.delete(joinedSessionId);
+      unbindActivitySessionBySessionId(joinedSessionId);
+    } else {
+      broadcast(session, state(joinedSessionId, session));
+    }
   });
 });
 

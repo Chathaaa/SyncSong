@@ -9,8 +9,19 @@ let appleWired = false;
 let applePlayInFlight = null;
 const APPLE_LIBRARY_TRACKS_ID = "__apple_library_tracks__";
 
+function isDiscordActivityContext() {
+  try {
+    const q = new URL(window.location.href).searchParams;
+    return q.get("mode") === "discord_activity" || !!q.get("frame_id");
+  } catch {
+    return false;
+  }
+}
 
-export const APPLE_DEV_TOKEN_URL = "https://syncsong-2lxp.onrender.com/apple/dev-token";
+
+export const APPLE_DEV_TOKEN_URL = isDiscordActivityContext()
+  ? "/api/apple/dev-token"
+  : "https://syncsong-2lxp.onrender.com/apple/dev-token";
 
 export function getAppleUserToken() {
   return localStorage.getItem("syncsong:appleUserToken") || null;

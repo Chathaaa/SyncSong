@@ -86,6 +86,21 @@ The server can run with minimal config, but Apple token issuance and deploy beha
 - `APPLE_KEY_ID` (required for Apple dev token endpoint)
 - `APPLE_DEV_TOKEN_TTL_DAYS` (optional, default `180`)
 - `APPLE_DEV_TOKEN_CACHE_SKEW_SECONDS` (optional, default `300`)
+- `DISCORD_ACTIVITY_JWT_SECRET` (required for Discord Activity auth token minting)
+- `DISCORD_APPLICATION_ID` (recommended in production; verifies bearer token belongs to your Discord app)
+- `DISCORD_CLIENT_ID` (required for Discord OAuth code exchange; usually same as `DISCORD_APPLICATION_ID`)
+- `DISCORD_CLIENT_SECRET` (required for Discord OAuth code exchange)
+- `DISCORD_OAUTH_REDIRECT_URI` (optional; set if your Discord OAuth app config requires it)
+- `DISCORD_ACTIVITY_ALLOW_INSECURE_DEV` (optional, set `1` for local dev only; do not enable in production)
+
+Discord Activity notes:
+- In Activity mode (`?mode=discord_activity`), clients can request a SyncSong token from `/discord/activity/token`.
+- Activity client auth flow now uses Discord Embedded App SDK (`authorize`) and backend OAuth code exchange at `/discord/activity/oauth/token`.
+- Production path expects a Discord bearer token (Authorization header) that the server verifies via Discord API.
+- Sessions are now bound to Discord `activityInstanceId`; other participants in the same Activity can auto-join via WebSocket (`session:autoJoinActivity`).
+
+Frontend env:
+- `VITE_DISCORD_CLIENT_ID` (required for Embedded App SDK initialization in the web client)
 
 ## Project Status
 
