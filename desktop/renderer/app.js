@@ -151,10 +151,11 @@ function send(type, payload) {
 
 async function discordAuthedFetch(path, init = {}) {
   const tok = String(discordActivity?.token || "").trim();
-  if (!tok) throw new Error("Discord activity token is missing.");
+  const bearer = tok || String(discordActivity?.context?.discordAccessToken || "").trim();
+  if (!bearer) throw new Error("Discord activity token is missing.");
   const headers = {
     ...(init.headers || {}),
-    Authorization: `Bearer ${tok}`,
+    Authorization: `Bearer ${bearer}`,
   };
   return fetch(`${BACKEND_HTTP_BASE}${path}`, { ...init, headers });
 }
