@@ -451,7 +451,7 @@ export async function spotifyFindUriForTrack(track) {
   return best?.uri || null;
 }
 
-export async function spotifyWebConnect() {
+export async function spotifyWebConnect({ useRedirect = false } = {}) {
   const SPOTIFY_CLIENT_ID = "e87ab2180d5a438ba6f23670e3c12f3d"; // same one you use in Electron
   const redirectUri = `${window.location.origin}/spotify-callback.html`;
 
@@ -505,6 +505,12 @@ export async function spotifyWebConnect() {
     `&scope=${encodeURIComponent(scopes)}` +
     `&state=${encodeURIComponent(state)}` +
     `&show_dialog=true`;
+
+  if (useRedirect) {
+    localStorage.setItem("spotify:return_to", window.location.href);
+    window.location.assign(authUrl);
+    return;
+  }
 
   // Popup window
   const w = window.open(authUrl, "spotify_auth", "width=520,height=680");
