@@ -89,6 +89,10 @@ The server can run with minimal config, but Apple token issuance and deploy beha
 - `DISCORD_ACTIVITY_JWT_SECRET` (required for Discord Activity auth token minting)
 - `DISCORD_ACTIVITY_ALLOW_INSECURE_DEV` (optional, set `1` for local dev only; do not enable in production)
 
+Discord Activity notes:
+- In Activity mode (`?mode=discord_activity`), clients can request a SyncSong token from `/discord/activity/token`.
+- Sessions are now bound to Discord `activityInstanceId`; other participants in the same Activity can auto-join via WebSocket (`session:autoJoinActivity`).
+
 ## Project Status
 
 This is an active personal project and still evolving. APIs, flows, and deployment assumptions may change while core sync behavior is hardened.

@@ -182,6 +182,8 @@ async function getAppleDevToken() {
    ========================================================= */
 
 const sessions = new Map(); // sessionId -> session
+const activityInstanceToSession = new Map(); // activityInstanceId -> sessionId
+const sessionToActivityInstance = new Map(); // sessionId -> activityInstanceId
 
 const uid = () => crypto.randomBytes(8).toString("hex");
 const makeSessionId = () => crypto.randomBytes(3).toString("hex").toUpperCase();
@@ -277,6 +279,27 @@ function state(sessionId, session) {
     queue: session.queue,
     nowPlaying: session.nowPlaying || null,
   };
+}
+
+function bindActivitySession(activityInstanceId, sessionId) {
+  const aid = String(activityInstanceId || "").trim();
+  if (!aid || !sessionId) return;
+
+  const prevSessionId = activityInstanceToSession.get(aid);
+  if (prevSessionId && prevSessionId !== sessionId) {
+    sessionToActivityInstance.delete(prevSessionId);
+  }
+
+  activityInstanceToSession.set(aid, sessionId);
+  sessionToActivityInstance.set(sessionId, aid);
+}
+
+function unbindActivitySessionBySessionId(sessionId) {
+  const aid = sessionToActivityInstance.get(sessionId);
+  if (!aid) return;
+  sessionToActivityInstance.delete(sessionId);
+  const current = activityInstanceToSession.get(aid);
+  if (current === sessionId) activityInstanceToSession.delete(aid);
 }
 
 /* =========================================================
@@ -702,6 +725,7 @@ wssSyncSong.on("connection", (ws) => {
       session.members.set(userId, { displayName, ws });
       sessions.set(sessionId, session);
       joinedSessionId = sessionId;
+      bindActivitySession(discordAuth?.activityInstanceId, sessionId);
 
       safeSend(ws, { type: "session:created", sessionId });
       broadcast(session, state(sessionId, session));
@@ -721,6 +745,29 @@ wssSyncSong.on("connection", (ws) => {
       session.members.set(userId, { displayName, ws });
       joinedSessionId = sessionId;
 
+      broadcast(session, state(sessionId, session));
+      return;
+    }
+
+    if (type === "session:autoJoinActivity") {
+      const activityInstanceId = String(discordAuth?.activityInstanceId || "").trim();
+      if (!activityInstanceId) {
+        safeSend(ws, { type: "session:autoJoin:miss", reason: "missing_activity_instance" });
+        return;
+      }
+
+      const sessionId = activityInstanceToSession.get(activityInstanceId);
+      const session = sessionId ? sessions.get(sessionId) : null;
+      if (!session || !sessionId) {
+        safeSend(ws, { type: "session:autoJoin:miss", reason: "no_active_session" });
+        return;
+      }
+
+      const displayName = String(discordAuth?.displayName || payload?.displayName || "Guest").slice(0, 32);
+      session.members.set(userId, { displayName, ws });
+      joinedSessionId = sessionId;
+
+      safeSend(ws, { type: "session:autoJoined", sessionId });
       broadcast(session, state(sessionId, session));
       return;
     }
@@ -917,11 +964,16 @@ wssSyncSong.on("connection", (ws) => {
     if (session.hostUserId === userId) {
       broadcast(session, { type: "error", message: "Host disconnected. Session ended." });
       sessions.delete(joinedSessionId);
+      unbindActivitySessionBySessionId(joinedSessionId);
       return;
     }
 
-    if (session.members.size === 0) sessions.delete(joinedSessionId);
-    else broadcast(session, state(joinedSessionId, session));
+    if (session.members.size === 0) {
+      sessions.delete(joinedSessionId);
+      unbindActivitySessionBySessionId(joinedSessionId);
+    } else {
+      broadcast(session, state(joinedSessionId, session));
+    }
   });
 });
 

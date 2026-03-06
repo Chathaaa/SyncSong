@@ -216,6 +216,15 @@ function ensureDiscordActivityReady() {
   return false;
 }
 
+function shouldAttemptActivityAutoJoin() {
+  if (!isDiscordActivityMode()) return false;
+  if (sessionId) return false;
+  const code = getRoomCodeFromUrl();
+  if (code) return false;
+  const aid = String(discordActivity?.context?.activityInstanceId || "").trim();
+  return !!aid;
+}
+
 function requestJoinSession(rawCode) {
   if (!ensureDiscordActivityReady()) return false;
 
@@ -477,6 +486,25 @@ function connectWS() {
         el("sessionMeta").textContent = name
           ? `Discord Activity linked as ${name}.`
           : "Discord Activity linked.";
+      }
+      if (shouldAttemptActivityAutoJoin()) {
+        send("session:autoJoinActivity", {});
+      }
+      return;
+    }
+
+    if (msg.type === "session:autoJoined") {
+      sessionId = String(msg.sessionId || "").trim().toUpperCase();
+      if (sessionId) {
+        localStorage.setItem(LAST_SESSION_KEY, sessionId);
+        localStorage.setItem(LAST_SESSION_AT_KEY, String(Date.now()));
+      }
+      return;
+    }
+
+    if (msg.type === "session:autoJoin:miss") {
+      if (!sessionId && isDiscordActivityMode()) {
+        el("sessionMeta").textContent = "No active room in this Discord Activity yet. Add a song to create one.";
       }
       return;
     }
