@@ -10,13 +10,13 @@ const IS_DISCORD_ACTIVITY_CONTEXT = (() => {
 const WS_URL = IS_DISCORD_ACTIVITY_CONTEXT
   ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`
   : "wss://syncsong-2lxp.onrender.com";
-const API_BASE = IS_DISCORD_ACTIVITY_CONTEXT ? "/api" : "";
+const BACKEND_HTTP_BASE = IS_DISCORD_ACTIVITY_CONTEXT ? "/api" : "https://syncsong-2lxp.onrender.com";
 
 // Import renderer-side providers (keeps app.js slim)
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
 import { APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken, ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized, appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext } from "./providers/apple.js";
 import { makeControls } from "./controls.js";
-import { initDiscordActivity } from "./discordActivity.js";
+import { initDiscordActivity, openExternalLink } from "./discordActivity.js";
 
 const controls = makeControls({
   getPlaybackSource: () => playbackSource,
@@ -156,7 +156,7 @@ async function discordAuthedFetch(path, init = {}) {
     ...(init.headers || {}),
     Authorization: `Bearer ${tok}`,
   };
-  return fetch(`${API_BASE}${path}`, { ...init, headers });
+  return fetch(`${BACKEND_HTTP_BASE}${path}`, { ...init, headers });
 }
 
 async function hydrateProvidersFromDiscordLink() {
@@ -226,6 +226,78 @@ async function syncLocalProvidersToDiscordLink() {
   } catch {
     // Best-effort only.
   }
+}
+
+function getProviderLinkContextFromUrl() {
+  try {
+    const q = new URL(window.location.href).searchParams;
+    return {
+      provider: String(q.get("linkProvider") || "").trim().toLowerCase(),
+      linkToken: String(q.get("linkToken") || "").trim(),
+    };
+  } catch {
+    return { provider: "", linkToken: "" };
+  }
+}
+
+const providerLinkContext = getProviderLinkContextFromUrl();
+
+async function syncLocalProvidersViaLinkToken() {
+  const linkToken = String(providerLinkContext?.linkToken || "").trim();
+  if (!linkToken) return false;
+
+  const spotifyRefresh = localStorage.getItem("spotify:refresh_token") || "";
+  const spotifyAccess = localStorage.getItem("spotify:access_token") || "";
+  const spotifyClientId = localStorage.getItem("spotify:client_id") || "";
+  const spotifyExpiresAt = Number(localStorage.getItem("spotify:expires_at") || "0") || 0;
+  const appleUserToken = localStorage.getItem(APPLE_USER_TOKEN_KEY) || "";
+
+  const body = { linkToken };
+  if (spotifyRefresh || spotifyAccess) {
+    body.spotify = {
+      refreshToken: spotifyRefresh,
+      accessToken: spotifyAccess,
+      clientId: spotifyClientId,
+      expiresAt: spotifyExpiresAt,
+    };
+  }
+  if (appleUserToken) {
+    body.apple = { userToken: appleUserToken };
+  }
+
+  if (!body.spotify && !body.apple) return false;
+
+  try {
+    const res = await fetch(`${BACKEND_HTTP_BASE}/discord/providers/by-link-token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return !!res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function requestProviderLinkToken(provider) {
+  const res = await discordAuthedFetch("/discord/providers/link-token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data?.linkToken) {
+    const msg = String(data?.message || data?.error || `Link token request failed (${res.status})`);
+    throw new Error(msg);
+  }
+  return String(data.linkToken);
+}
+
+function makeProviderLinkUrl(provider, linkToken) {
+  const u = new URL(window.location.origin + "/");
+  u.searchParams.set("linkProvider", String(provider || ""));
+  u.searchParams.set("linkToken", String(linkToken || ""));
+  return u.toString();
 }
 
 function escapeHtml(s) {
@@ -2381,6 +2453,16 @@ function wireUi() {
 
   el("connectSpotify")?.addEventListener("click", async () => {
     try {
+      if (IS_DISCORD_ACTIVITY_CONTEXT) {
+        const linkToken = await requestProviderLinkToken("spotify");
+        const linkUrl = makeProviderLinkUrl("spotify", linkToken);
+        const opened = await openExternalLink(linkUrl);
+        if (!opened) throw new Error("Could not open external browser for Spotify link.");
+        el("sessionMeta").textContent =
+          "Opened browser to link Spotify. Complete sign-in there, then return to Discord Activity.";
+        return;
+      }
+
       // Web: if we already have a refresh token, refresh silently and skip popup.
       if (!window?.api?.spotifyConnect) {
         const { spotifyEnsureAccessToken } = await import("./providers/spotify.js");
@@ -2389,6 +2471,7 @@ function wireUi() {
           await spotifyEnsureAccessToken();
           el("sessionMeta").textContent = "Spotify connected!";
           await syncLocalProvidersToDiscordLink();
+          await syncLocalProvidersViaLinkToken();
           await switchPlaybackSource("spotify");
           await reloadMusic();
           renderConnectPrompt();
@@ -2414,6 +2497,7 @@ function wireUi() {
         
         el("sessionMeta").textContent = "Spotify connected!";
         await syncLocalProvidersToDiscordLink();
+        await syncLocalProvidersViaLinkToken();
         await switchPlaybackSource("spotify");
         await reloadMusic();
         renderConnectPrompt();
@@ -2432,11 +2516,22 @@ function wireUi() {
   // Apple Music connect
   el("connectApple")?.addEventListener("click", async () => {
     try {
+      if (IS_DISCORD_ACTIVITY_CONTEXT) {
+        const linkToken = await requestProviderLinkToken("apple");
+        const linkUrl = makeProviderLinkUrl("apple", linkToken);
+        const opened = await openExternalLink(linkUrl);
+        if (!opened) throw new Error("Could not open external browser for Apple Music link.");
+        el("sessionMeta").textContent =
+          "Opened browser to link Apple Music. Complete sign-in there, then return to Discord Activity.";
+        return;
+      }
+
       const mk = await ensureAppleConfigured();
       const userToken = await mk.authorize(); // triggers Apple sign-in
       localStorage.setItem(APPLE_USER_TOKEN_KEY, userToken);
       el("sessionMeta").textContent = "Apple Music connected!";
       await syncLocalProvidersToDiscordLink();
+      await syncLocalProvidersViaLinkToken();
       await switchPlaybackSource("apple");
       await reloadMusic();
       renderConnectPrompt();
@@ -2570,6 +2665,16 @@ document.addEventListener("visibilitychange", () => {
   renderConnectPrompt();
   renderConnectButtons();
   startHostAutoAdvance();
+
+  if (!IS_DISCORD_ACTIVITY_CONTEXT && providerLinkContext.linkToken) {
+    const p = providerLinkContext.provider === "apple" ? "Apple Music" : "Spotify";
+    const linked = await syncLocalProvidersViaLinkToken();
+    if (linked) {
+      el("sessionMeta").textContent = `${p} linked to your Discord Activity account.`;
+    } else {
+      el("sessionMeta").textContent = `Complete ${p} sign-in, then return to this page to finish linking.`;
+    }
+  }
 
   if (roomCodeFromUrl) {
     requestJoinSession(roomCodeFromUrl);

@@ -218,6 +218,43 @@ async function signDiscordActivityToken(claims) {
     .sign(getDiscordActivityKey());
 }
 
+async function signDiscordProviderLinkToken(discordUserId, provider) {
+  if (!hasDiscordActivityAuthConfig()) {
+    throw new Error("Missing or weak DISCORD_ACTIVITY_JWT_SECRET");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  return new SignJWT({
+    provider: String(provider || "").trim(),
+    purpose: "provider_link",
+  })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(String(discordUserId || "").trim())
+    .setIssuedAt(now)
+    .setExpirationTime(now + (10 * 60)) // 10 minutes
+    .setIssuer("syncsong")
+    .setAudience("syncsong-discord-provider-link")
+    .sign(getDiscordActivityKey());
+}
+
+async function verifyDiscordProviderLinkToken(token) {
+  if (!hasDiscordActivityAuthConfig()) {
+    throw new Error("DISCORD_ACTIVITY_JWT_SECRET is not configured");
+  }
+  const { payload } = await jwtVerify(String(token || ""), getDiscordActivityKey(), {
+    issuer: "syncsong",
+    audience: "syncsong-discord-provider-link",
+  });
+  const sub = String(payload.sub || "").trim();
+  if (!sub) throw new Error("missing_link_subject");
+  if (String(payload.purpose || "") !== "provider_link") {
+    throw new Error("invalid_link_purpose");
+  }
+  return {
+    discordUserId: sub,
+    provider: String(payload.provider || "").trim(),
+  };
+}
+
 async function verifyDiscordActivityToken(token) {
   if (!hasDiscordActivityAuthConfig()) {
     throw new Error("DISCORD_ACTIVITY_JWT_SECRET is not configured");
@@ -654,6 +691,111 @@ const server = http.createServer(async (req, res) => {
         msg.startsWith("discord_api_error:")
       ) {
         json(req, res, 401, { ok: false, error: "unauthorized", message: msg });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_provider_link_failed", message: msg });
+    }
+    return;
+  }
+
+  // SyncSong: mint short-lived provider link token from Activity identity.
+  if (req.method === "POST" && req.url === "/discord/providers/link-token") {
+    try {
+      const identity = await resolveDiscordIdentityFromHttpRequest(req);
+      const body = await readJsonBody(req, { maxBytes: 20_000 });
+      const provider = String(body?.provider || "").trim().toLowerCase();
+      if (provider && provider !== "spotify" && provider !== "apple") {
+        json(req, res, 400, { ok: false, error: "invalid_provider" });
+        return;
+      }
+
+      const linkToken = await signDiscordProviderLinkToken(identity.discordUserId, provider || "any");
+      json(req, res, 200, { ok: true, linkToken, expiresInSec: 10 * 60, provider: provider || "any" });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === "invalid_json") {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+      if (msg === "payload_too_large") {
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        return;
+      }
+      if (
+        msg === "missing_authorization_bearer" ||
+        msg === "missing_discord_access_token" ||
+        msg === "discord_missing_user_id" ||
+        msg === "discord_application_mismatch" ||
+        msg.startsWith("discord_api_error:")
+      ) {
+        json(req, res, 401, { ok: false, error: "unauthorized", message: msg });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_provider_link_token_failed", message: msg });
+    }
+    return;
+  }
+
+  // SyncSong: save provider tokens using short-lived provider link token (no Discord bearer required).
+  if (req.method === "POST" && req.url === "/discord/providers/by-link-token") {
+    try {
+      const body = await readJsonBody(req, { maxBytes: 200_000 });
+      const linkToken = String(body?.linkToken || "").trim();
+      if (!linkToken) {
+        json(req, res, 400, { ok: false, error: "missing_link_token" });
+        return;
+      }
+
+      const link = await verifyDiscordProviderLinkToken(linkToken);
+      const current = discordProviderLinks.get(link.discordUserId) || { updatedAt: Date.now() };
+      const next = { ...current, updatedAt: Date.now() };
+
+      const spotify = body?.spotify;
+      if (spotify && typeof spotify === "object" && (link.provider === "spotify" || link.provider === "any")) {
+        const accessToken = String(spotify?.accessToken || "").trim();
+        const refreshToken = String(spotify?.refreshToken || "").trim();
+        const clientId = String(spotify?.clientId || "").trim();
+        const expiresAt = Number(spotify?.expiresAt || 0) || 0;
+        if (accessToken || refreshToken) {
+          next.spotify = {
+            accessToken: accessToken.slice(0, 4096),
+            refreshToken: refreshToken.slice(0, 4096),
+            clientId: clientId.slice(0, 128),
+            expiresAt,
+            updatedAt: Date.now(),
+          };
+        }
+      }
+
+      const apple = body?.apple;
+      if (apple && typeof apple === "object" && (link.provider === "apple" || link.provider === "any")) {
+        const userToken = String(apple?.userToken || "").trim();
+        if (userToken) {
+          next.apple = {
+            userToken: userToken.slice(0, 4096),
+            updatedAt: Date.now(),
+          };
+        }
+      }
+
+      discordProviderLinks.set(link.discordUserId, next);
+      json(req, res, 200, { ok: true });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === "invalid_json") {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+      if (msg === "payload_too_large") {
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        return;
+      }
+      if (msg === "missing_link_subject" || msg === "invalid_link_purpose") {
+        json(req, res, 401, { ok: false, error: "invalid_link_token", message: msg });
+        return;
+      }
+      if (msg.includes("JWT")) {
+        json(req, res, 401, { ok: false, error: "invalid_link_token", message: msg });
         return;
       }
       json(req, res, 500, { ok: false, error: "discord_provider_link_failed", message: msg });
