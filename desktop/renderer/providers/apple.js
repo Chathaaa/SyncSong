@@ -12,7 +12,12 @@ const APPLE_LIBRARY_TRACKS_ID = "__apple_library_tracks__";
 function isDiscordActivityContext() {
   try {
     const q = new URL(window.location.href).searchParams;
-    return q.get("mode") === "discord_activity" || !!q.get("frame_id");
+    return (
+      q.get("mode") === "discord_activity" ||
+      !!q.get("frame_id") ||
+      !!q.get("instance_id") ||
+      !!q.get("location_id")
+    );
   } catch {
     return false;
   }
