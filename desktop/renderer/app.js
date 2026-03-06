@@ -39,6 +39,7 @@ let discordActivity = {
   token: "",
   context: null,
   error: "",
+  debug: null,
 };
 let linkedProvidersHydrated = false;
 
@@ -147,6 +148,29 @@ function send(type, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify({ type, payload }));
   return true;
+}
+
+function activityDebugSummary() {
+  const d = discordActivity?.debug;
+  if (!d) return "";
+  const stage = String(d.stage || "unknown");
+  const flags = [
+    `sdk:${d.sdk ? "ok" : "no"}`,
+    `oauth:${d.oauthToken ? "ok" : "no"}`,
+    `token:${d.activityToken ? "ok" : "no"}`,
+  ].join(" ");
+  const msg = String(d.message || "").trim();
+  return `Activity auth debug -> stage:${stage} ${flags}${msg ? ` msg:${msg}` : ""}`;
+}
+
+function renderActivityDebugLine() {
+  if (!discordActivity?.enabled) return;
+  const hint = el("autoRoomHint");
+  if (!hint) return;
+  const line = activityDebugSummary();
+  if (!line) return;
+  hint.textContent = line;
+  hint.style.display = "block";
 }
 
 async function discordAuthedFetch(path, init = {}) {
@@ -652,6 +676,7 @@ function connectWS() {
           ? `Discord Activity linked as ${name}.`
           : "Discord Activity linked.";
       }
+      renderActivityDebugLine();
       if (shouldAttemptActivityAutoJoin()) {
         send("session:autoJoinActivity", {});
       }
@@ -2510,7 +2535,9 @@ function wireUi() {
 
     } catch (e) {
       console.error("[spotify] connect failed", e);
-      el("sessionMeta").textContent = "Spotify connect failed: " + (e?.message || String(e));
+      const dbg = activityDebugSummary();
+      el("sessionMeta").textContent =
+        "Spotify connect failed: " + (e?.message || String(e)) + (dbg ? ` | ${dbg}` : "");
     }
   });
 
@@ -2541,7 +2568,8 @@ function wireUi() {
       const base = "Apple connect failed: " + (e?.message || String(e));
       if (IS_DISCORD_ACTIVITY_CONTEXT) {
         el("sessionMeta").textContent =
-          `${base} In Discord Activity, Apple sign-in may be blocked by embedded popup restrictions.`;
+          `${base} In Discord Activity, Apple sign-in may be blocked by embedded popup restrictions.` +
+          (activityDebugSummary() ? ` | ${activityDebugSummary()}` : "");
       } else {
         el("sessionMeta").textContent = base;
       }
@@ -2653,6 +2681,7 @@ document.addEventListener("visibilitychange", () => {
       await hydrateProvidersFromDiscordLink();
       await syncLocalProvidersToDiscordLink();
     }
+    renderActivityDebugLine();
   }
 
   connectWS();

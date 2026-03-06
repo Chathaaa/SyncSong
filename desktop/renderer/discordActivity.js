@@ -124,29 +124,49 @@ export async function initDiscordActivity() {
   const queryCtx = parseContextFromQuery();
   const enabled = shouldEnableActivityMode(queryCtx);
   if (!enabled) {
-    return { enabled: false, token: "", context: null, error: "" };
+    return { enabled: false, token: "", context: null, error: "", debug: null };
   }
+
+  const debug = {
+    stage: "init",
+    sdk: false,
+    oauthCode: false,
+    oauthToken: false,
+    activityToken: false,
+    message: "",
+  };
 
   try {
     let ctx = { ...queryCtx };
     const apiBase = apiBaseForContext(queryCtx);
 
     try {
+      debug.stage = "sdk_auth";
       const sdkCtx = await getAccessTokenFromSdk(queryCtx, apiBase);
+      debug.sdk = true;
+      debug.oauthCode = true;
+      debug.oauthToken = !!sdkCtx?.discordAccessToken;
       ctx = { ...ctx, ...sdkCtx };
     } catch (sdkErr) {
+      debug.message = `sdk_auth_failed:${sdkErr?.message || String(sdkErr)}`;
       // Preserve compatibility for local/manual testing paths where SDK cannot initialize.
       if (!ctx.discordAccessToken) throw sdkErr;
     }
 
+    debug.stage = "activity_token";
     const token = await fetchActivityToken(ctx, apiBase);
-    return { enabled: true, token, context: ctx, error: "" };
+    debug.activityToken = !!token;
+    debug.stage = "ready";
+    return { enabled: true, token, context: ctx, error: "", debug };
   } catch (err) {
+    debug.stage = debug.stage === "init" ? "failed" : debug.stage;
+    debug.message = debug.message || String(err?.message || err);
     return {
       enabled: true,
       token: "",
       context: queryCtx,
       error: `Discord Activity auth failed: ${err?.message || String(err)}`,
+      debug,
     };
   }
 }
