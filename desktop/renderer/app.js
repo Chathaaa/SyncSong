@@ -319,7 +319,8 @@ async function requestProviderLinkToken(provider) {
 }
 
 function makeProviderLinkUrl(provider, linkToken) {
-  const u = new URL(window.location.origin + "/");
+  const base = String(import.meta.env.VITE_PUBLIC_APP_URL || "https://sync-song-opal.vercel.app").trim();
+  const u = new URL(base.endsWith("/") ? base : `${base}/`);
   u.searchParams.set("linkProvider", String(provider || ""));
   u.searchParams.set("linkToken", String(linkToken || ""));
   return u.toString();
