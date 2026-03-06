@@ -42,6 +42,8 @@ let discordActivity = {
   debug: null,
 };
 let linkedProvidersHydrated = false;
+let providerLinkPollTimer = null;
+let providerLinkPollUntil = 0;
 
 let queue = [];
 let nowPlaying = null;
@@ -185,13 +187,18 @@ async function discordAuthedFetch(path, init = {}) {
 }
 
 async function hydrateProvidersFromDiscordLink() {
-  if (!discordActivity?.enabled || !discordActivity?.token || linkedProvidersHydrated) return;
+  const hasBearer = !!(
+    String(discordActivity?.token || "").trim() ||
+    String(discordActivity?.context?.discordAccessToken || "").trim()
+  );
+  if (!discordActivity?.enabled || !hasBearer || linkedProvidersHydrated) return false;
 
   try {
     const res = await discordAuthedFetch("/discord/providers/me");
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const data = await res.json().catch(() => ({}));
 
+    let hydratedAny = false;
     const sp = data?.spotify || {};
     if (sp?.connected) {
       const localRefresh = localStorage.getItem("spotify:refresh_token") || "";
@@ -202,6 +209,7 @@ async function hydrateProvidersFromDiscordLink() {
         if (sp.expiresAt) localStorage.setItem("spotify:expires_at", String(Number(sp.expiresAt) || 0));
         if (sp.clientId) localStorage.setItem("spotify:client_id", String(sp.clientId));
       }
+      hydratedAny = hydratedAny || !!(sp.accessToken || sp.refreshToken);
     }
 
     const ap = data?.apple || {};
@@ -210,11 +218,14 @@ async function hydrateProvidersFromDiscordLink() {
       if (!localAppleToken && ap.userToken) {
         localStorage.setItem(APPLE_USER_TOKEN_KEY, String(ap.userToken));
       }
+      hydratedAny = hydratedAny || !!ap.userToken;
     }
 
     linkedProvidersHydrated = true;
+    return hydratedAny;
   } catch {
     // Best-effort only.
+    return false;
   }
 }
 
@@ -324,6 +335,48 @@ function makeProviderLinkUrl(provider, linkToken) {
   u.searchParams.set("linkProvider", String(provider || ""));
   u.searchParams.set("linkToken", String(linkToken || ""));
   return u.toString();
+}
+
+function stopProviderLinkPolling() {
+  if (providerLinkPollTimer) {
+    clearInterval(providerLinkPollTimer);
+    providerLinkPollTimer = null;
+  }
+  providerLinkPollUntil = 0;
+}
+
+async function refreshLinkedProvidersAndUi({ force = false } = {}) {
+  if (!discordActivity?.enabled) return false;
+  const hadSpotify = hasSpotifyAuth();
+  const hadApple = hasAppleAuth();
+
+  if (force) linkedProvidersHydrated = false;
+  const hydratedAny = await hydrateProvidersFromDiscordLink();
+  const hasNewProvider = (!hadSpotify && hasSpotifyAuth()) || (!hadApple && hasAppleAuth());
+
+  if (hydratedAny || hasNewProvider) {
+    renderConnectPrompt();
+    renderConnectButtons();
+    try { await reloadMusic(); } catch {}
+    return true;
+  }
+  return false;
+}
+
+function startProviderLinkPolling(providerLabel) {
+  stopProviderLinkPolling();
+  providerLinkPollUntil = Date.now() + 120000; // up to 2 minutes
+  providerLinkPollTimer = setInterval(async () => {
+    if (Date.now() > providerLinkPollUntil) {
+      stopProviderLinkPolling();
+      return;
+    }
+    const linked = await refreshLinkedProvidersAndUi({ force: true });
+    if (linked) {
+      stopProviderLinkPolling();
+      el("sessionMeta").textContent = `${providerLabel} linked. You can now browse music here.`;
+    }
+  }, 3000);
 }
 
 function escapeHtml(s) {
@@ -2485,6 +2538,7 @@ function wireUi() {
         const linkUrl = makeProviderLinkUrl("spotify", linkToken);
         const opened = await openExternalLink(linkUrl);
         if (!opened) throw new Error("Could not open external browser for Spotify link.");
+        startProviderLinkPolling("Spotify");
         el("sessionMeta").textContent =
           "Opened browser to link Spotify. Complete sign-in there, then return to Discord Activity.";
         return;
@@ -2550,6 +2604,7 @@ function wireUi() {
         const linkUrl = makeProviderLinkUrl("apple", linkToken);
         const opened = await openExternalLink(linkUrl);
         if (!opened) throw new Error("Could not open external browser for Apple Music link.");
+        startProviderLinkPolling("Apple Music");
         el("sessionMeta").textContent =
           "Opened browser to link Apple Music. Complete sign-in there, then return to Discord Activity.";
         return;
@@ -2658,6 +2713,9 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
     try { renderNowPlaying(); } catch {}
     try { renderQueue(); } catch {}
+    if (IS_DISCORD_ACTIVITY_CONTEXT) {
+      refreshLinkedProvidersAndUi({ force: true }).catch(() => {});
+    }
   }
 });
 
@@ -2679,7 +2737,7 @@ document.addEventListener("visibilitychange", () => {
       el("sessionMeta").textContent = discordActivity.error;
     } else {
       el("sessionMeta").textContent = "Discord Activity mode enabled.";
-      await hydrateProvidersFromDiscordLink();
+      await refreshLinkedProvidersAndUi({ force: true });
       await syncLocalProvidersToDiscordLink();
     }
     renderActivityDebugLine();
