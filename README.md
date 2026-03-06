@@ -101,6 +101,8 @@ Discord Activity notes:
 - Activity clients can sync linked provider tokens via:
   - `POST /discord/providers`
   - `GET /discord/providers/me`
+  - `POST /discord/providers/link-token`
+  - `POST /discord/providers/by-link-token`
   This currently uses in-memory server storage (non-persistent).
 
 Frontend env:

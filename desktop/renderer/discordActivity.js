@@ -1,6 +1,7 @@
 import { DiscordSDK } from "@discord/embedded-app-sdk";
 
 const ACTIVITY_MODE = "discord_activity";
+let discordSdkSingleton = null;
 
 function pickFirst(...vals) {
   for (const v of vals) {
@@ -63,6 +64,7 @@ async function getAccessTokenFromSdk(ctx, apiBase) {
   }
 
   const discordSdk = new DiscordSDK(clientId);
+  discordSdkSingleton = discordSdk;
   await discordSdk.ready();
 
   const authz = await discordSdk.commands.authorize({
@@ -146,5 +148,28 @@ export async function initDiscordActivity() {
       context: queryCtx,
       error: `Discord Activity auth failed: ${err?.message || String(err)}`,
     };
+  }
+}
+
+export async function openExternalLink(url) {
+  const nextUrl = String(url || "").trim();
+  if (!nextUrl) return false;
+
+  try {
+    if (discordSdkSingleton?.commands?.openExternalLink) {
+      await discordSdkSingleton.commands.openExternalLink({ url: nextUrl });
+      return true;
+    }
+  } catch {
+    // fall through
+  }
+
+  const w = window.open(nextUrl, "_blank", "noopener,noreferrer");
+  if (w) return true;
+  try {
+    window.location.assign(nextUrl);
+    return true;
+  } catch {
+    return false;
   }
 }
