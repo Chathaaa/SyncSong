@@ -107,6 +107,7 @@ Discord Activity notes:
 
 Frontend env:
 - `VITE_DISCORD_CLIENT_ID` (required for Embedded App SDK initialization in the web client)
+- `VITE_DISCORD_OAUTH_REDIRECT_URI` (recommended; must match Discord OAuth redirect config)
 
 ## Project Status
 

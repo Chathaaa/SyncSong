@@ -43,11 +43,11 @@ function apiBaseForContext(ctx) {
   return shouldEnableActivityMode(ctx) ? "/api" : "";
 }
 
-async function exchangeDiscordOauthCode(code, apiBase) {
+async function exchangeDiscordOauthCode(code, apiBase, redirectUri) {
   const res = await fetch(`${apiBase}/discord/activity/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ code, redirectUri }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data?.access_token) {
@@ -62,6 +62,10 @@ async function getAccessTokenFromSdk(ctx, apiBase) {
   if (!clientId) {
     throw new Error("Missing Discord client id (set VITE_DISCORD_CLIENT_ID).");
   }
+  const redirectUri = pickFirst(
+    import.meta.env.VITE_DISCORD_OAUTH_REDIRECT_URI,
+    `${window.location.origin}/`
+  );
 
   const discordSdk = new DiscordSDK(clientId);
   discordSdkSingleton = discordSdk;
@@ -73,9 +77,10 @@ async function getAccessTokenFromSdk(ctx, apiBase) {
     state: randomState(),
     prompt: "none",
     scope: ["identify", "guilds"],
+    redirect_uri: redirectUri,
   });
 
-  const oauth = await exchangeDiscordOauthCode(String(authz?.code || ""), apiBase);
+  const oauth = await exchangeDiscordOauthCode(String(authz?.code || ""), apiBase, redirectUri);
   const accessToken = String(oauth.access_token || "").trim();
   if (!accessToken) throw new Error("Discord OAuth returned no access token.");
 

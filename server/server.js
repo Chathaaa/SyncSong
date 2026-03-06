@@ -509,6 +509,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const body = await readJsonBody(req, { maxBytes: 50_000 });
       const code = String(body?.code || "").trim();
+      const redirectUri = String(body?.redirectUri || "").trim();
 
       if (!code) {
         json(req, res, 400, { ok: false, error: "missing_oauth_code" });
@@ -529,7 +530,8 @@ const server = http.createServer(async (req, res) => {
         client_id: DISCORD_CLIENT_ID,
         client_secret: DISCORD_CLIENT_SECRET,
       };
-      if (DISCORD_OAUTH_REDIRECT_URI) form.redirect_uri = DISCORD_OAUTH_REDIRECT_URI;
+      if (redirectUri) form.redirect_uri = redirectUri;
+      else if (DISCORD_OAUTH_REDIRECT_URI) form.redirect_uri = DISCORD_OAUTH_REDIRECT_URI;
 
       const token = await discordApiPostForm("/oauth2/token", form);
       const accessToken = String(token?.access_token || "").trim();
