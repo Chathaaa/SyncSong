@@ -4,6 +4,7 @@ const WS_URL = "wss://syncsong-2lxp.onrender.com";
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
 import { APPLE_DEV_TOKEN_URL, getAppleUserToken, fetchAppleDeveloperToken, ensureAppleConfigured, appleFetch, appleCatalogFetch, appleEnsureAuthorized, appleResolveCatalogSongId, applePlayTrack, applePause, applePlay, appleNext } from "./providers/apple.js";
 import { makeControls } from "./controls.js";
+import { initDiscordActivity } from "./discordActivity.js";
 
 const controls = makeControls({
   getPlaybackSource: () => playbackSource,
@@ -21,6 +22,12 @@ let sessionId = null;
 let hostUserId = null;
 let lastRejoinAttempt = "";
 let pendingJoinCode = "";
+let discordActivity = {
+  enabled: false,
+  token: "",
+  context: null,
+  error: "",
+};
 
 let queue = [];
 let nowPlaying = null;
@@ -197,11 +204,25 @@ function normalizeSessionCode(raw) {
   return String(raw || "").trim().toUpperCase();
 }
 
+function isDiscordActivityMode() {
+  return !!discordActivity?.enabled;
+}
+
+function ensureDiscordActivityReady() {
+  if (!isDiscordActivityMode()) return true;
+  if (discordActivity.token) return true;
+  const err = discordActivity.error || "Discord Activity auth is not ready.";
+  el("sessionMeta").textContent = err;
+  return false;
+}
+
 function requestJoinSession(rawCode) {
+  if (!ensureDiscordActivityReady()) return false;
+
   const code = normalizeSessionCode(rawCode);
   if (!code) return false;
 
-  const displayName = getDisplayName("Guest");
+  const displayName = getPreferredDisplayName("Guest");
   lastRejoinAttempt = code;
 
   if (send("session:join", { sessionId: code, displayName })) {
@@ -240,6 +261,12 @@ async function autoCopyInvitePulse() {
 function getDisplayName(defaultName) {
   const v = (el("displayName")?.value || localStorage.getItem(DISPLAY_NAME_KEY) || defaultName || "").trim();
   return (v || defaultName || "Guest").slice(0, 32);
+}
+
+function getPreferredDisplayName(defaultName) {
+  const discordName = String(discordActivity?.context?.displayName || "").trim();
+  if (discordName) return discordName.slice(0, 32);
+  return getDisplayName(defaultName);
 }
 
 function updatePeopleMeta() {
@@ -424,6 +451,11 @@ function connectWS() {
   ws.onopen = () => {
     el("sessionMeta").textContent = "";
     pendingCreate = false; // allow session:create to be attempted again
+
+    if (discordActivity.enabled && discordActivity.token) {
+      send("auth:discordActivity", { token: discordActivity.token });
+    }
+
     renderRejoinButton();
 
     if (pendingJoinCode) {
@@ -436,6 +468,16 @@ function connectWS() {
 
     if (msg.type === "hello") {
       userId = msg.userId;
+      return;
+    }
+
+    if (msg.type === "auth:ok" && msg.provider === "discord_activity") {
+      const name = String(msg.displayName || "");
+      if (!sessionId) {
+        el("sessionMeta").textContent = name
+          ? `Discord Activity linked as ${name}.`
+          : "Discord Activity linked.";
+      }
       return;
     }
 
@@ -1105,6 +1147,7 @@ async function setSource(next) {
 
 // ---------- Queue + playback ----------
 function ensureSessionForAdd(track) {
+  if (!ensureDiscordActivityReady()) return false;
   if (sessionId) return true;
 
   pendingAddTracks.push(track);
@@ -1117,7 +1160,7 @@ function ensureSessionForAdd(track) {
 
   if (!pendingCreate) {
     pendingCreate = true;
-    const displayName = (el("displayName").value || "Host").trim().slice(0, 32);
+    const displayName = getPreferredDisplayName("Host");
 
     const ok = send("session:create", { displayName });
     if (!ok) {
@@ -2363,8 +2406,24 @@ document.addEventListener("visibilitychange", () => {
 (async function boot() {
   const roomCodeFromUrl = getRoomCodeFromUrl();
 
-  connectWS();
   wireUi();
+  discordActivity = await initDiscordActivity();
+  if (discordActivity.enabled) {
+    const dn = el("displayName");
+    const activityName = String(discordActivity?.context?.displayName || "").trim();
+    if (dn && activityName) {
+      dn.value = activityName.slice(0, 32);
+      dn.disabled = true;
+      dn.title = "Display name is managed by Discord Activity identity.";
+    }
+    if (discordActivity.error) {
+      el("sessionMeta").textContent = discordActivity.error;
+    } else {
+      el("sessionMeta").textContent = "Discord Activity mode enabled.";
+    }
+  }
+
+  connectWS();
   if (roomCodeFromUrl && el("joinCode")) {
     el("joinCode").value = roomCodeFromUrl;
   }

@@ -2,3 +2,5 @@ node_modules/
 desktop/node_modules/
 .env
 .DS_Store
+
+docs/discord-activity-plan.md

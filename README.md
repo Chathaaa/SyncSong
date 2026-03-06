@@ -86,6 +86,8 @@ The server can run with minimal config, but Apple token issuance and deploy beha
 - `APPLE_KEY_ID` (required for Apple dev token endpoint)
 - `APPLE_DEV_TOKEN_TTL_DAYS` (optional, default `180`)
 - `APPLE_DEV_TOKEN_CACHE_SKEW_SECONDS` (optional, default `300`)
+- `DISCORD_ACTIVITY_JWT_SECRET` (required for Discord Activity auth token minting)
+- `DISCORD_ACTIVITY_ALLOW_INSECURE_DEV` (optional, set `1` for local dev only; do not enable in production)
 
 ## Project Status
 
