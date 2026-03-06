@@ -190,6 +190,9 @@ const makeSessionId = () => crypto.randomBytes(3).toString("hex").toUpperCase();
 const DISCORD_ACTIVITY_JWT_SECRET = String(process.env.DISCORD_ACTIVITY_JWT_SECRET || "");
 const DISCORD_ACTIVITY_ALLOW_INSECURE_DEV = String(process.env.DISCORD_ACTIVITY_ALLOW_INSECURE_DEV || "") === "1";
 const DISCORD_APPLICATION_ID = String(process.env.DISCORD_APPLICATION_ID || "").trim();
+const DISCORD_CLIENT_ID = String(process.env.DISCORD_CLIENT_ID || DISCORD_APPLICATION_ID || "").trim();
+const DISCORD_CLIENT_SECRET = String(process.env.DISCORD_CLIENT_SECRET || "").trim();
+const DISCORD_OAUTH_REDIRECT_URI = String(process.env.DISCORD_OAUTH_REDIRECT_URI || "").trim();
 
 function hasDiscordActivityAuthConfig() {
   return DISCORD_ACTIVITY_JWT_SECRET.length >= 16;
@@ -303,6 +306,45 @@ function discordApiGetJson(path, accessToken) {
   });
 }
 
+function discordApiPostForm(path, form) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`https://discord.com/api/v10${path}`);
+    const body = new URLSearchParams(form).toString();
+    const req = https.request(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        let parsed = {};
+        try {
+          parsed = JSON.parse(data || "{}");
+        } catch {
+          reject(new Error(`discord_invalid_json:${path}`));
+          return;
+        }
+
+        const status = Number(res.statusCode || 0);
+        if (status >= 200 && status < 300) {
+          resolve(parsed);
+          return;
+        }
+
+        const err = String(parsed?.error_description || parsed?.message || `discord_http_${status}`);
+        reject(new Error(`discord_api_error:${path}:${status}:${err}`));
+      });
+    });
+
+    req.on("error", (err) => reject(new Error(`discord_network_error:${err?.message || String(err)}`)));
+    req.write(body);
+    req.end();
+  });
+}
+
 async function verifyDiscordBearerIdentity(accessToken) {
   if (!accessToken) throw new Error("missing_discord_access_token");
 
@@ -396,6 +438,62 @@ const server = http.createServer(async (req, res) => {
       json(req, res, 200, { token, exp: expMs });
     } catch (e) {
       json(req, res, 500, { error: e?.message || String(e) });
+    }
+    return;
+  }
+
+  // SyncSong: Discord Activity auth -> SyncSong JWT
+  if (req.method === "POST" && req.url === "/discord/activity/oauth/token") {
+    try {
+      const body = await readJsonBody(req, { maxBytes: 50_000 });
+      const code = String(body?.code || "").trim();
+
+      if (!code) {
+        json(req, res, 400, { ok: false, error: "missing_oauth_code" });
+        return;
+      }
+      if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
+        json(req, res, 503, {
+          ok: false,
+          error: "discord_oauth_not_configured",
+          message: "Set DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET.",
+        });
+        return;
+      }
+
+      const form = {
+        grant_type: "authorization_code",
+        code,
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+      };
+      if (DISCORD_OAUTH_REDIRECT_URI) form.redirect_uri = DISCORD_OAUTH_REDIRECT_URI;
+
+      const token = await discordApiPostForm("/oauth2/token", form);
+      const accessToken = String(token?.access_token || "").trim();
+      if (!accessToken) {
+        json(req, res, 502, { ok: false, error: "discord_missing_access_token" });
+        return;
+      }
+
+      json(req, res, 200, {
+        ok: true,
+        access_token: accessToken,
+        token_type: String(token?.token_type || "Bearer"),
+        expires_in: Number(token?.expires_in || 0),
+        scope: String(token?.scope || ""),
+      });
+    } catch (e) {
+      const msg = e?.message || String(e);
+      if (msg === "invalid_json") {
+        json(req, res, 400, { ok: false, error: "invalid_json" });
+        return;
+      }
+      if (msg === "payload_too_large") {
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        return;
+      }
+      json(req, res, 500, { ok: false, error: "discord_oauth_exchange_failed", message: msg });
     }
     return;
   }
