@@ -22,6 +22,9 @@ function isDiscordActivityContext() {
 export const APPLE_DEV_TOKEN_URL = isDiscordActivityContext()
   ? "/api/apple/dev-token"
   : "https://syncsong-2lxp.onrender.com/apple/dev-token";
+const APPLE_API_BASE = isDiscordActivityContext()
+  ? "/apple-api/v1"
+  : "https://api.music.apple.com/v1";
 
 export function getAppleUserToken() {
   return localStorage.getItem("syncsong:appleUserToken") || null;
@@ -78,7 +81,7 @@ export async function appleFetch(path) {
   if (!devToken) throw new Error("Apple dev token missing. Click Connect Apple.");
   if (!userToken) throw new Error("Apple not authorized. Click Connect Apple.");
 
-  const res = await fetch(`https://api.music.apple.com/v1${path}`, {
+  const res = await fetch(`${APPLE_API_BASE}${path}`, {
     headers: {
       Authorization: `Bearer ${devToken}`,
       "Music-User-Token": userToken,
@@ -145,7 +148,7 @@ export async function appleEnsureAuthorized() {
 export async function appleCatalogFetch(path) {
   const devToken = localStorage.getItem("syncsong:appleDevToken");
   if (!devToken) throw new Error("Apple dev token missing.");
-  const res = await fetch(`https://api.music.apple.com/v1${path}`, {
+  const res = await fetch(`${APPLE_API_BASE}${path}`, {
     headers: { Authorization: `Bearer ${devToken}` }
   });
   const json = await res.json().catch(() => ({}));

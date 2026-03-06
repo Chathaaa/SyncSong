@@ -2,7 +2,21 @@
 // Exports useful functions the app uses: getSpotifyAccessToken, spotifyFetch, spotifyApi,
 // ensureSpotifyWebPlayer, spotifyPlayUriInApp
 
-const SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token";
+function isDiscordActivityContext() {
+  try {
+    const q = new URL(window.location.href).searchParams;
+    return q.get("mode") === "discord_activity" || !!q.get("frame_id");
+  } catch {
+    return false;
+  }
+}
+
+const SPOTIFY_TOKEN_URL = isDiscordActivityContext()
+  ? "/spotify-auth/api/token"
+  : "https://accounts.spotify.com/api/token";
+const SPOTIFY_API_BASE = isDiscordActivityContext()
+  ? "/spotify-api/v1"
+  : "https://api.spotify.com/v1";
 const SPOTIFY_LIBRARY_TRACKS_ID = "__spotify_library_tracks__";
 let spotifyPlaybackPrepared = false;
 let spotifyPreparedDeviceId = "";
@@ -110,7 +124,7 @@ export async function spotifyFetch(path, opts = {}) {
   const token = await spotifyEnsureAccessToken();
   if (!token) throw new Error("Spotify not connected. Click Connect Spotify.");
 
-  const res = await fetch(`https://api.spotify.com/v1${path}`, {
+  const res = await fetch(`${SPOTIFY_API_BASE}${path}`, {
     method: opts.method || "GET",
     headers: {
       Authorization: `Bearer ${token}`,

@@ -107,6 +107,10 @@ Discord Activity notes:
 - Discord Activity CSP blocks direct third-party SDK scripts. Add URL mappings for:
   - `/apple-sdk` -> `js-cdn.music.apple.com`
   - `/spotify-sdk` -> `sdk.scdn.co`
+- Discord Activity CSP also blocks direct third-party API connections. Add URL mappings for:
+  - `/apple-api` -> `api.music.apple.com`
+  - `/spotify-api` -> `api.spotify.com`
+  - `/spotify-auth` -> `accounts.spotify.com`
 
 Frontend env:
 - `VITE_DISCORD_CLIENT_ID` (required for Embedded App SDK initialization in the web client)
