@@ -104,6 +104,9 @@ Discord Activity notes:
   - `POST /discord/providers/link-token`
   - `POST /discord/providers/by-link-token`
   This currently uses in-memory server storage (non-persistent).
+- Discord Activity CSP blocks direct third-party SDK scripts. Add URL mappings for:
+  - `/apple-sdk` -> `js-cdn.music.apple.com`
+  - `/spotify-sdk` -> `sdk.scdn.co`
 
 Frontend env:
 - `VITE_DISCORD_CLIENT_ID` (required for Embedded App SDK initialization in the web client)

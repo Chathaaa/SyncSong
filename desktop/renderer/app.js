@@ -11,6 +11,12 @@ const WS_URL = IS_DISCORD_ACTIVITY_CONTEXT
   ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`
   : "wss://syncsong-2lxp.onrender.com";
 const BACKEND_HTTP_BASE = IS_DISCORD_ACTIVITY_CONTEXT ? "/api" : "https://syncsong-2lxp.onrender.com";
+const APPLE_SDK_URL = IS_DISCORD_ACTIVITY_CONTEXT
+  ? "/apple-sdk/musickit/v3/musickit.js"
+  : "https://js-cdn.music.apple.com/musickit/v3/musickit.js";
+const SPOTIFY_SDK_URL = IS_DISCORD_ACTIVITY_CONTEXT
+  ? "/spotify-sdk/spotify-player.js"
+  : "https://sdk.scdn.co/spotify-player.js";
 
 // Import renderer-side providers (keeps app.js slim)
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
@@ -150,6 +156,67 @@ function send(type, payload) {
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
   ws.send(JSON.stringify({ type, payload }));
   return true;
+}
+
+function loadExternalScript(src, { attrs = {}, timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector(`script[src="${src}"]`);
+    if (existing && existing.dataset.loaded === "1") {
+      resolve();
+      return;
+    }
+    if (existing && existing.dataset.loading === "1") {
+      const onReady = () => {
+        existing.removeEventListener("syncsong:loaded", onReady);
+        resolve();
+      };
+      const onErr = () => {
+        existing.removeEventListener("syncsong:error", onErr);
+        reject(new Error(`Script failed: ${src}`));
+      };
+      existing.addEventListener("syncsong:loaded", onReady);
+      existing.addEventListener("syncsong:error", onErr);
+      return;
+    }
+
+    const s = existing || document.createElement("script");
+    s.src = src;
+    s.async = true;
+    s.dataset.loading = "1";
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === null || v === undefined) continue;
+      s.setAttribute(k, String(v));
+    }
+
+    const timer = setTimeout(() => {
+      s.dispatchEvent(new Event("syncsong:error"));
+      reject(new Error(`Script timeout: ${src}`));
+    }, timeoutMs);
+
+    s.onload = () => {
+      clearTimeout(timer);
+      s.dataset.loading = "0";
+      s.dataset.loaded = "1";
+      s.dispatchEvent(new Event("syncsong:loaded"));
+      resolve();
+    };
+    s.onerror = () => {
+      clearTimeout(timer);
+      s.dataset.loading = "0";
+      s.dispatchEvent(new Event("syncsong:error"));
+      reject(new Error(`Script load failed: ${src}`));
+    };
+
+    if (!existing) document.head.appendChild(s);
+  });
+}
+
+async function loadProviderSdkScripts() {
+  // Load both proactively so connect buttons work without race conditions.
+  await Promise.all([
+    loadExternalScript(APPLE_SDK_URL, { attrs: { "data-web-components-async": "" } }),
+    loadExternalScript(SPOTIFY_SDK_URL),
+  ]);
 }
 
 function activityDebugSummary() {
@@ -355,9 +422,35 @@ async function refreshLinkedProvidersAndUi({ force = false } = {}) {
   const hasNewProvider = (!hadSpotify && hasSpotifyAuth()) || (!hadApple && hasAppleAuth());
 
   if (hydratedAny || hasNewProvider) {
+    const hasSp = hasSpotifyAuth();
+    const hasAp = hasAppleAuth();
+    let desiredSource = musicSource;
+    if (hasAp && !hasSp) desiredSource = "apple";
+    else if (hasSp && !hasAp) desiredSource = "spotify";
+
+    if (desiredSource !== musicSource) {
+      musicSource = desiredSource;
+      localStorage.setItem(LAST_SOURCE_KEY, musicSource);
+      try {
+        await setSource(musicSource);
+      } catch {}
+    } else {
+      try { await reloadMusic(); } catch {}
+    }
+
+    // Keep playback source aligned when only one provider is connected.
+    if (hasAp && !hasSp && playbackSource !== "apple") {
+      playbackSource = "apple";
+      localStorage.setItem(PLAYBACK_SOURCE_KEY, "apple");
+      renderPlaybackSource();
+    } else if (hasSp && !hasAp && playbackSource !== "spotify") {
+      playbackSource = "spotify";
+      localStorage.setItem(PLAYBACK_SOURCE_KEY, "spotify");
+      renderPlaybackSource();
+    }
+
     renderConnectPrompt();
     renderConnectButtons();
-    try { await reloadMusic(); } catch {}
     return true;
   }
   return false;
@@ -2722,6 +2815,16 @@ document.addEventListener("visibilitychange", () => {
 // ---------- Boot ----------
 (async function boot() {
   const roomCodeFromUrl = getRoomCodeFromUrl();
+
+  try {
+    await loadProviderSdkScripts();
+  } catch (e) {
+    console.error("[boot] SDK script load failed", e);
+    if (IS_DISCORD_ACTIVITY_CONTEXT) {
+      el("sessionMeta").textContent =
+        `Music SDK load failed in Activity context. Check Discord URL mappings for /apple-sdk and /spotify-sdk.`;
+    }
+  }
 
   wireUi();
   discordActivity = await initDiscordActivity();
