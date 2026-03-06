@@ -38,8 +38,12 @@ function shouldEnableActivityMode(ctx) {
   return !!(ctx.frameId && ctx.platform);
 }
 
-async function exchangeDiscordOauthCode(code) {
-  const res = await fetch("/discord/activity/oauth/token", {
+function apiBaseForContext(ctx) {
+  return shouldEnableActivityMode(ctx) ? "/api" : "";
+}
+
+async function exchangeDiscordOauthCode(code, apiBase) {
+  const res = await fetch(`${apiBase}/discord/activity/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code }),
@@ -52,7 +56,7 @@ async function exchangeDiscordOauthCode(code) {
   return data;
 }
 
-async function getAccessTokenFromSdk(ctx) {
+async function getAccessTokenFromSdk(ctx, apiBase) {
   const clientId = pickFirst(import.meta.env.VITE_DISCORD_CLIENT_ID, ctx.discordClientId);
   if (!clientId) {
     throw new Error("Missing Discord client id (set VITE_DISCORD_CLIENT_ID).");
@@ -69,7 +73,7 @@ async function getAccessTokenFromSdk(ctx) {
     scope: ["identify", "guilds"],
   });
 
-  const oauth = await exchangeDiscordOauthCode(String(authz?.code || ""));
+  const oauth = await exchangeDiscordOauthCode(String(authz?.code || ""), apiBase);
   const accessToken = String(oauth.access_token || "").trim();
   if (!accessToken) throw new Error("Discord OAuth returned no access token.");
 
@@ -86,13 +90,13 @@ async function getAccessTokenFromSdk(ctx) {
   };
 }
 
-async function fetchActivityToken(ctx) {
+async function fetchActivityToken(ctx, apiBase) {
   const headers = { "Content-Type": "application/json" };
   if (ctx.discordAccessToken) {
     headers.Authorization = `Bearer ${ctx.discordAccessToken}`;
   }
 
-  const res = await fetch("/discord/activity/token", {
+  const res = await fetch(`${apiBase}/discord/activity/token`, {
     method: "POST",
     headers,
     body: JSON.stringify({
@@ -123,16 +127,17 @@ export async function initDiscordActivity() {
 
   try {
     let ctx = { ...queryCtx };
+    const apiBase = apiBaseForContext(queryCtx);
 
     try {
-      const sdkCtx = await getAccessTokenFromSdk(queryCtx);
+      const sdkCtx = await getAccessTokenFromSdk(queryCtx, apiBase);
       ctx = { ...ctx, ...sdkCtx };
     } catch (sdkErr) {
       // Preserve compatibility for local/manual testing paths where SDK cannot initialize.
       if (!ctx.discordAccessToken) throw sdkErr;
     }
 
-    const token = await fetchActivityToken(ctx);
+    const token = await fetchActivityToken(ctx, apiBase);
     return { enabled: true, token, context: ctx, error: "" };
   } catch (err) {
     return {

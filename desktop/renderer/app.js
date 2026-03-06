@@ -1,4 +1,15 @@
-const WS_URL = "wss://syncsong-2lxp.onrender.com";
+const IS_DISCORD_ACTIVITY_CONTEXT = (() => {
+  try {
+    const q = new URL(window.location.href).searchParams;
+    return q.get("mode") === "discord_activity" || !!q.get("frame_id");
+  } catch {
+    return false;
+  }
+})();
+
+const WS_URL = IS_DISCORD_ACTIVITY_CONTEXT
+  ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`
+  : "wss://syncsong-2lxp.onrender.com";
 
 // Import renderer-side providers (keeps app.js slim)
 import { getSpotifyAccessToken, spotifyFetch, spotifyApi, ensureSpotifyWebPlayer, spotifyPlayUriInApp } from "./providers/spotify.js";
