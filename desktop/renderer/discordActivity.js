@@ -18,19 +18,27 @@ function parseContextFromQuery() {
     guildId: pickFirst(q.get("guildId"), q.get("guild_id")),
     channelId: pickFirst(q.get("channelId"), q.get("channel_id")),
     activityInstanceId: pickFirst(q.get("activityInstanceId"), q.get("activity_instance_id"), q.get("instance_id")),
+    discordAccessToken: pickFirst(q.get("discordAccessToken"), q.get("discord_access_token")),
   };
 }
 
 async function fetchActivityToken(ctx) {
+  const headers = { "Content-Type": "application/json" };
+  if (ctx.discordAccessToken) {
+    headers.Authorization = `Bearer ${ctx.discordAccessToken}`;
+  }
+
   const res = await fetch("/discord/activity/token", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify({
       discordUserId: ctx.discordUserId,
       displayName: ctx.displayName,
       guildId: ctx.guildId,
       channelId: ctx.channelId,
       activityInstanceId: ctx.activityInstanceId,
+      // Dev fallback only; server ignores this when Authorization bearer token is present.
+      discordAccessToken: ctx.discordAccessToken,
     }),
   });
 

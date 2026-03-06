@@ -189,6 +189,7 @@ const uid = () => crypto.randomBytes(8).toString("hex");
 const makeSessionId = () => crypto.randomBytes(3).toString("hex").toUpperCase();
 const DISCORD_ACTIVITY_JWT_SECRET = String(process.env.DISCORD_ACTIVITY_JWT_SECRET || "");
 const DISCORD_ACTIVITY_ALLOW_INSECURE_DEV = String(process.env.DISCORD_ACTIVITY_ALLOW_INSECURE_DEV || "") === "1";
+const DISCORD_APPLICATION_ID = String(process.env.DISCORD_APPLICATION_ID || "").trim();
 
 function hasDiscordActivityAuthConfig() {
   return DISCORD_ACTIVITY_JWT_SECRET.length >= 16;
@@ -257,6 +258,73 @@ function readJsonBody(req, { maxBytes = 1e6 } = {}) {
 
     req.on("error", (err) => reject(err));
   });
+}
+
+function parseBearerToken(req) {
+  const header = String(req?.headers?.authorization || "").trim();
+  if (!header) return "";
+  const m = /^Bearer\s+(.+)$/i.exec(header);
+  return m ? String(m[1] || "").trim() : "";
+}
+
+function discordApiGetJson(path, accessToken) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`https://discord.com/api/v10${path}`);
+    const req = https.request(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }, (res) => {
+      let body = "";
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        let parsed = {};
+        try {
+          parsed = JSON.parse(body || "{}");
+        } catch {
+          reject(new Error(`discord_invalid_json:${path}`));
+          return;
+        }
+
+        const status = Number(res.statusCode || 0);
+        if (status >= 200 && status < 300) {
+          resolve(parsed);
+          return;
+        }
+
+        const err = String(parsed?.message || `discord_http_${status}`);
+        reject(new Error(`discord_api_error:${path}:${status}:${err}`));
+      });
+    });
+
+    req.on("error", (err) => reject(new Error(`discord_network_error:${err?.message || String(err)}`)));
+    req.end();
+  });
+}
+
+async function verifyDiscordBearerIdentity(accessToken) {
+  if (!accessToken) throw new Error("missing_discord_access_token");
+
+  const [me, oauth] = await Promise.all([
+    discordApiGetJson("/users/@me", accessToken),
+    discordApiGetJson("/oauth2/@me", accessToken),
+  ]);
+
+  const discordUserId = String(me?.id || "").trim();
+  if (!discordUserId) throw new Error("discord_missing_user_id");
+
+  const appId = String(oauth?.application?.id || "").trim();
+  if (DISCORD_APPLICATION_ID && appId && appId !== DISCORD_APPLICATION_ID) {
+    throw new Error("discord_application_mismatch");
+  }
+
+  const profileName = String(me?.global_name || me?.username || "").trim().slice(0, 32);
+  return {
+    discordUserId,
+    profileName,
+    applicationId: appId,
+  };
 }
 
 function safeSend(ws, obj) {
@@ -336,11 +404,14 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && req.url === "/discord/activity/token") {
     try {
       const body = await readJsonBody(req, { maxBytes: 50_000 });
-      const displayName = String(body?.displayName || "Guest").trim().slice(0, 32);
+      const requestedDisplayName = String(body?.displayName || "Guest").trim().slice(0, 32);
       const discordUserId = String(body?.discordUserId || "").trim();
       const guildId = String(body?.guildId || "").trim();
       const channelId = String(body?.channelId || "").trim();
       const activityInstanceId = String(body?.activityInstanceId || "").trim();
+      const bearerToken = parseBearerToken(req);
+      const bodyAccessToken = String(body?.discordAccessToken || "").trim();
+      const discordAccessToken = bearerToken || bodyAccessToken;
 
       if (!hasDiscordActivityAuthConfig()) {
         json(req, res, 503, {
@@ -351,28 +422,40 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      // This insecure path is for local/dev bootstrap before Discord SDK proof validation is added.
-      if (!DISCORD_ACTIVITY_ALLOW_INSECURE_DEV) {
+      let verifiedUserId = "";
+      let verifiedDisplayName = "";
+      let verificationSource = "discord_oauth";
+
+      if (discordAccessToken) {
+        const verified = await verifyDiscordBearerIdentity(discordAccessToken);
+        verifiedUserId = verified.discordUserId;
+        verifiedDisplayName = verified.profileName || requestedDisplayName || "Guest";
+      } else if (DISCORD_ACTIVITY_ALLOW_INSECURE_DEV) {
+        // Local bootstrap fallback only.
+        if (!discordUserId) {
+          json(req, res, 400, { ok: false, error: "missing_discord_user_id" });
+          return;
+        }
+        verifiedUserId = discordUserId;
+        verifiedDisplayName = requestedDisplayName || "Guest";
+        verificationSource = "insecure_dev";
+      } else {
         json(req, res, 401, {
           ok: false,
-          error: "discord_activity_verification_required",
-          message: "Enable DISCORD_ACTIVITY_ALLOW_INSECURE_DEV=1 for local testing.",
+          error: "missing_discord_access_token",
+          message: "Provide a Discord bearer token. For local testing only, set DISCORD_ACTIVITY_ALLOW_INSECURE_DEV=1.",
         });
         return;
       }
 
-      if (!discordUserId) {
-        json(req, res, 400, { ok: false, error: "missing_discord_user_id" });
-        return;
-      }
-
       const token = await signDiscordActivityToken({
-        sub: discordUserId,
-        displayName,
+        sub: verifiedUserId,
+        displayName: verifiedDisplayName,
         guildId,
         channelId,
         activityInstanceId,
         source: "discord_activity",
+        verificationSource,
       });
 
       json(req, res, 200, { ok: true, token, expiresInSec: 12 * 60 * 60 });
