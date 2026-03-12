@@ -388,6 +388,12 @@ button:disabled{ opacity: .42; cursor: not-allowed; }
   margin-left: auto;
 }
 
+.playlistActions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
 #musicPlaylists{
   flex: 1 1 auto;
 }
@@ -832,6 +838,11 @@ select#musicPlaylists{
   .rowWrap > *{
     flex: 1 1 auto;
     min-width: 140px;
+  }
+
+  .playlistActions{
+    width: 100%;
+    margin-left: 0;
   }
 
   /* The playlist + search should go full width on phones */

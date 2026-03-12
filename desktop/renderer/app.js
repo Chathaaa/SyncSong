@@ -40,6 +40,7 @@ let pendingCreate = false;
 
 // playback behavior
 let loopQueue = true; // default
+let shuffleQueue = localStorage.getItem("syncsong:shuffleQueue") === "1";
 let autoAdvanceLock = false;
 let lastApplePosMs = 0;
 let lastSpotifyPosMs = 0;
@@ -64,6 +65,8 @@ const ignoreForMs = (ms) => { transitionIgnoreUntil = Math.max(transitionIgnoreU
 let lastSpotifyUriLoaded = "";
 let hostIntentIsPlaying = true; // host's desired play state (source of truth for transitions)
 let dragQueueId = null;
+let shuffleHistory = [];
+let shuffleUpcoming = [];
 
 
 // ---------- Unified music panel ----------
@@ -73,12 +76,14 @@ const SPOTIFY_LIBRARY_TRACKS_ID = "__spotify_library_tracks__";
 const APPLE_LIBRARY_TRACKS_ID = "__apple_library_tracks__";
 
 const LAST_APPLE_PLAYLIST_KEY = "syncsong:lastApplePlaylistId";
+const LAST_QUEUE_SNAPSHOT_KEY = "syncsong:lastQueueSnapshot";
 const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
 const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
 
 const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
 
 const DISPLAY_NAME_KEY = "syncsong:displayName";
+const SHUFFLE_QUEUE_KEY = "syncsong:shuffleQueue";
 const AUTO_ROOM_HINT_SEEN_KEY = "syncsong:autoRoomHintSeen";
 const LAST_SESSION_KEY = "syncsong:lastSessionId";
 const LAST_SESSION_AT_KEY = "syncsong:lastSessionAt";
@@ -471,6 +476,8 @@ function connectWS() {
       partyMode = !!msg.partyMode
       queue = msg.queue || [];
       nowPlaying = msg.nowPlaying || null;
+      syncShuffleStateWithQueue();
+      if (isHost()) saveLastQueueSnapshot();
 
       updatePeopleMeta();
       renderSessionMeta();
@@ -496,6 +503,8 @@ function connectWS() {
 
     if (msg.type === "queue:updated") {
       queue = msg.queue || [];
+      syncShuffleStateWithQueue();
+      if (isHost()) saveLastQueueSnapshot();
       updatePeopleMeta();
       renderQueue();
       return;
@@ -682,6 +691,109 @@ function renderLoopToggle() {
   const btn = el("toggleLoop");
   if (!btn) return;
   btn.textContent = `Loop: ${loopQueue ? "On" : "Off"}`;
+}
+
+function renderShuffleToggle() {
+  const btn = el("toggleShuffle");
+  if (!btn) return;
+  btn.textContent = `Shuffle: ${shuffleQueue ? "On" : "Off"}`;
+}
+
+function shuffleArray(items) {
+  const arr = items.slice();
+  for (let i = arr.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function syncShuffleStateWithQueue() {
+  const validIds = new Set((queue || []).map((item) => item.queueId));
+  const currentId = nowPlaying?.queueId || "";
+  shuffleHistory = shuffleHistory.filter((queueId) => validIds.has(queueId));
+  shuffleUpcoming = shuffleUpcoming.filter((queueId) => validIds.has(queueId) && queueId !== currentId);
+}
+
+function resetShuffleState() {
+  shuffleHistory = [];
+  shuffleUpcoming = [];
+}
+
+function refillShuffleUpcoming(currentQueueId) {
+  const exclude = new Set([currentQueueId, ...shuffleUpcoming]);
+  const candidateIds = queue
+    .map((item) => item.queueId)
+    .filter((queueId) => !exclude.has(queueId));
+  const shuffled = shuffleArray(candidateIds);
+
+  if (!shuffled.length && loopQueue) {
+    const loopCandidates = queue
+      .map((item) => item.queueId)
+      .filter((queueId) => queueId !== currentQueueId);
+    shuffleUpcoming = shuffleArray(loopCandidates);
+    return;
+  }
+
+  shuffleUpcoming.push(...shuffled);
+}
+
+function getLastQueueSnapshot() {
+  try {
+    const raw = localStorage.getItem(LAST_QUEUE_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed?.items)
+      ? parsed.items.filter((track) => track?.title && track?.artist)
+      : [];
+    if (!items.length) return null;
+    return {
+      savedAt: Number(parsed?.savedAt || 0),
+      items,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function renderLoadLastQueueButton() {
+  const btn = el("loadLastQueue");
+  if (!btn) return;
+
+  const snapshot = getLastQueueSnapshot();
+  if (!snapshot?.items?.length) {
+    btn.style.display = "none";
+    btn.disabled = true;
+    btn.textContent = "Load Last Queue";
+    btn.title = "";
+    return;
+  }
+
+  btn.style.display = "inline-block";
+  btn.disabled = false;
+  btn.textContent = `Load Last Queue (${snapshot.items.length})`;
+  btn.title = snapshot.savedAt
+    ? `Saved ${new Date(snapshot.savedAt).toLocaleString()}`
+    : "Load your last saved queue";
+}
+
+function saveLastQueueSnapshot() {
+  if (!isHost() || !Array.isArray(queue) || !queue.length) return;
+
+  const items = queue
+    .map((item) => item?.track)
+    .filter((track) => track?.title && track?.artist);
+
+  if (!items.length) return;
+
+  localStorage.setItem(
+    LAST_QUEUE_SNAPSHOT_KEY,
+    JSON.stringify({
+      savedAt: Date.now(),
+      items,
+    })
+  );
+  renderLoadLastQueueButton();
 }
 
 function clearMusicPanel() {
@@ -1104,10 +1216,11 @@ async function setSource(next) {
 }
 
 // ---------- Queue + playback ----------
-function ensureSessionForAdd(track) {
+function ensureSessionForAdd(trackOrTracks) {
   if (sessionId) return true;
 
-  pendingAddTracks.push(track);
+  const batch = Array.isArray(trackOrTracks) ? trackOrTracks : [trackOrTracks];
+  pendingAddTracks.push(...batch.filter(Boolean));
 
   // If we're not connected yet, don't lock pendingCreate forever
   if (!ws || ws.readyState !== WebSocket.OPEN) {
@@ -1137,6 +1250,46 @@ function addToQueue(track) {
   send("queue:add", { sessionId, track });
 }
 
+function getNextShuffleQueueItem() {
+  if (!queue.length) return null;
+  const currentId = nowPlaying?.queueId || "";
+
+  if (queue.length === 1) {
+    if (!currentId || loopQueue) return queue[0];
+    return null;
+  }
+
+  syncShuffleStateWithQueue();
+  if (!shuffleUpcoming.length) refillShuffleUpcoming(currentId);
+  if (!shuffleUpcoming.length) return null;
+
+  const nextId = shuffleUpcoming.shift();
+  return queue.find((item) => item.queueId === nextId) || null;
+}
+
+async function loadLastQueueSnapshot() {
+  const snapshot = getLastQueueSnapshot();
+  if (!snapshot?.items?.length) {
+    el("sessionMeta").textContent = "No saved queue found yet.";
+    renderLoadLastQueueButton();
+    return;
+  }
+
+  const tracksToLoad = snapshot.items.filter((track) => track?.title && track?.artist);
+  if (!tracksToLoad.length) {
+    el("sessionMeta").textContent = "Saved queue is empty.";
+    return;
+  }
+
+  if (!ensureSessionForAdd(tracksToLoad)) return;
+
+  tracksToLoad.forEach((track) => {
+    send("queue:add", { sessionId, track });
+  });
+
+  el("sessionMeta").textContent = `Loaded ${tracksToLoad.length} tracks from your last queue.`;
+}
+
 function capitalizeFirstLetter(val) {
     return String(val).charAt(0).toUpperCase() + String(val).slice(1);
 }
@@ -1144,6 +1297,8 @@ function capitalizeFirstLetter(val) {
 function applyAndSendQueueOrder(newQueue) {
   if (!sessionId) return;
   queue = newQueue;
+  syncShuffleStateWithQueue();
+  if (isHost()) saveLastQueueSnapshot();
   updatePeopleMeta?.();
   renderQueue();
   // Send only the order of queueIds (server should reorder its queue)
@@ -1242,13 +1397,14 @@ function renderQueue() {
   });
 }
 
-async function hostPlayQueueItem(qItem, { isPlaying } = {}) {
+async function hostPlayQueueItem(qItem, { isPlaying, preserveShuffleState = false } = {}) {
   const isHost = userId && hostUserId && userId === hostUserId;
   if (!isHost) return;
 
   autoAdvanceLock = false;
 
   const nextIsPlaying = (typeof isPlaying === "boolean") ? isPlaying : true;
+  if (!preserveShuffleState) resetShuffleState();
 
   hostIntentIsPlaying = nextIsPlaying;
 
@@ -1281,13 +1437,35 @@ async function playNextInSharedQueue() {
   const wasPlaying = hostIntentIsPlaying;
 
   if (!nowPlaying?.queueId) {
+    if (shuffleQueue) {
+      const nextShuffleItem = getNextShuffleQueueItem() || queue[0];
+      await hostPlayQueueItem(nextShuffleItem, { isPlaying: wasPlaying, preserveShuffleState: true });
+      return;
+    }
     await hostPlayQueueItem(queue[0], { isPlaying: wasPlaying });
     return;
   }
 
   const idx = queue.findIndex(q => q.queueId === nowPlaying.queueId);
   if (idx < 0) {
+    if (shuffleQueue) {
+      const nextShuffleItem = getNextShuffleQueueItem() || queue[0];
+      await hostPlayQueueItem(nextShuffleItem, { isPlaying: wasPlaying, preserveShuffleState: true });
+      return;
+    }
     await hostPlayQueueItem(queue[0], { isPlaying: wasPlaying });
+    return;
+  }
+
+  if (shuffleQueue) {
+    const nextShuffleItem = getNextShuffleQueueItem();
+    if (!nextShuffleItem) return;
+
+    if (nowPlaying?.queueId && shuffleHistory[shuffleHistory.length - 1] !== nowPlaying.queueId) {
+      shuffleHistory.push(nowPlaying.queueId);
+    }
+
+    await hostPlayQueueItem(nextShuffleItem, { isPlaying: wasPlaying, preserveShuffleState: true });
     return;
   }
 
@@ -1313,8 +1491,29 @@ async function playPrevInSharedQueue() {
   stopAppleStateSync();
 
   if (!nowPlaying?.queueId) {
+    if (shuffleQueue) {
+      const priorId = shuffleHistory.pop();
+      const priorItem = queue.find((item) => item.queueId === priorId);
+      if (priorItem) {
+        await hostPlayQueueItem(priorItem, { preserveShuffleState: true });
+        return;
+      }
+    }
     await hostPlayQueueItem(queue[0]);
     return;
+  }
+
+  if (shuffleQueue) {
+    syncShuffleStateWithQueue();
+    while (shuffleHistory.length) {
+      const priorId = shuffleHistory.pop();
+      const priorItem = queue.find((item) => item.queueId === priorId);
+      if (priorItem) {
+        shuffleUpcoming.unshift(nowPlaying.queueId);
+        await hostPlayQueueItem(priorItem, { preserveShuffleState: true });
+        return;
+      }
+    }
   }
 
   const idx = queue.findIndex(q => q.queueId === nowPlaying.queueId);
@@ -1882,6 +2081,7 @@ function wireUi() {
   });
 
   el("reloadMusic")?.addEventListener("click", reloadMusic);
+  el("loadLastQueue")?.addEventListener("click", loadLastQueueSnapshot);
 
   // Playlist change
   el("musicPlaylists")?.addEventListener("change", async () => {
@@ -1896,6 +2096,14 @@ function wireUi() {
   el("searchMine")?.addEventListener("input", handleSearchInput);
 
   // Loop toggle
+  el("toggleShuffle")?.addEventListener("click", () => {
+    if (!canControlPlayback()) return;
+    shuffleQueue = !shuffleQueue;
+    localStorage.setItem(SHUFFLE_QUEUE_KEY, shuffleQueue ? "1" : "0");
+    resetShuffleState();
+    renderShuffleToggle();
+  });
+
   el("toggleLoop")?.addEventListener("click", () => {
     if (!canControlPlayback()) return;
     loopQueue = !loopQueue;
@@ -2369,6 +2577,8 @@ document.addEventListener("visibilitychange", () => {
     el("joinCode").value = roomCodeFromUrl;
   }
   renderRejoinButton();
+  renderLoadLastQueueButton();
+  renderShuffleToggle();
   renderLoopToggle();
   renderShareButton();
   renderPlaybackSource();
