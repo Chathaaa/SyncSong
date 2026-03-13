@@ -88,6 +88,7 @@ const AUTO_ROOM_HINT_SEEN_KEY = "syncsong:autoRoomHintSeen";
 const LAST_SESSION_KEY = "syncsong:lastSessionId";
 const LAST_SESSION_AT_KEY = "syncsong:lastSessionAt";
 const ROOM_QUERY_PARAM = "room";
+const PREV_RESTART_THRESHOLD_MS = 3000;
 
 function hasSpotifyAuth() {
   return !!(localStorage.getItem("spotify:refresh_token") || localStorage.getItem("spotify:access_token"));
@@ -1485,6 +1486,25 @@ async function playPrevInSharedQueue() {
   const isHost = userId && hostUserId && userId === hostUserId;
   if (!isHost) return;
   if (!queue.length) return;
+
+  const currentPlayheadMs = Math.max(0, Number(nowPlaying?.playheadMs || 0));
+  if (nowPlaying?.queueId && currentPlayheadMs >= PREV_RESTART_THRESHOLD_MS) {
+    try {
+      await playerSeek(0);
+    } catch {}
+
+    nowPlaying = {
+      ...nowPlaying,
+      playheadMs: 0,
+      updatedAt: Date.now(),
+    };
+    send("host:state", { sessionId, nowPlaying });
+    if (!document.hidden) renderNowPlaying();
+
+    if (playbackSource === "apple") startAppleStateSync();
+    if (playbackSource === "spotify") startSpotifyStateSync();
+    return;
+  }
 
   ignoreForMs(1500);
   stopSpotifyStateSync();
