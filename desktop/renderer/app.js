@@ -494,8 +494,8 @@ function connectWS() {
 
 
       // ✅ IMPORTANT: guest join sync guard
-      const isHost = userId && hostUserId && userId === hostUserId;
-      if (!isHost && nowPlaying?.playheadMs > 0) {
+      const isCurrentHost = userId && hostUserId && userId === hostUserId;
+      if (!isCurrentHost && nowPlaying?.playheadMs > 0) {
         // give the seek time to apply before pollers fight it
         remoteSeekIgnoreUntil = Date.now() + 1200;
       }
