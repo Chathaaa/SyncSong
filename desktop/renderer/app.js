@@ -68,6 +68,13 @@ let dragQueueId = null;
 let shuffleHistory = [];
 let shuffleUpcoming = [];
 
+function resetProviderPositionCaches() {
+  lastApplePosMs = 0;
+  lastSpotifyPosMs = 0;
+  lastAppleMaxPosMs = 0;
+  lastSpotifyMaxPosMs = 0;
+}
+
 
 // ---------- Unified music panel ----------
 const LAST_SOURCE_KEY = "syncsong:lastSource";
@@ -597,6 +604,50 @@ function connectWS() {
       nowPlaying = { ...nowPlaying, playheadMs, updatedAt: Date.now() };
       send("host:state", { sessionId, nowPlaying });
       if (!document.hidden) renderNowPlaying();
+      return;
+    }
+
+    if (msg.type === "control:queue-play") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+
+      const queueId = String(msg.payload?.queueId || "");
+      if (!queueId) return;
+
+      const qItem = queue.find((item) => item.queueId === queueId);
+      if (!qItem) return;
+
+      await hostPlayQueueItem(qItem);
+      return;
+    }
+
+    if (msg.type === "control:queue-remove") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+
+      const queueId = String(msg.payload?.queueId || "");
+      if (!queueId) return;
+
+      send("queue:remove", { sessionId, queueId });
+      return;
+    }
+
+    if (msg.type === "control:queue-reorder") {
+      const isHost = userId && hostUserId && userId === hostUserId;
+      if (!isHost) return;
+
+      const order = Array.isArray(msg.payload?.order) ? msg.payload.order : [];
+      if (!order.length) return;
+
+      const byId = new Map((queue || []).map((item) => [item.queueId, item]));
+      const next = [];
+      for (const id of order) {
+        const item = byId.get(id);
+        if (item) next.push(item);
+      }
+      if (!next.length) return;
+
+      applyAndSendQueueOrder(next);
       return;
     }
 
@@ -1306,6 +1357,21 @@ function applyAndSendQueueOrder(newQueue) {
   send("queue:reorder", { sessionId, order: queue.map(q => q.queueId) });
 }
 
+function requestQueuePlay(queueId) {
+  if (!sessionId || !queueId) return;
+  send("control:queue-play", { sessionId, queueId });
+}
+
+function requestQueueRemove(queueId) {
+  if (!sessionId || !queueId) return;
+  send("control:queue-remove", { sessionId, queueId });
+}
+
+function requestQueueReorder(order) {
+  if (!sessionId || !Array.isArray(order) || !order.length) return;
+  send("control:queue-reorder", { sessionId, order });
+}
+
 function renderQueue() {
   const box = el("queue");
   if (!box) return;
@@ -1335,10 +1401,14 @@ function renderQueue() {
     `;
 
     if (canControl) {
-      row.querySelector("[data-play]").addEventListener("click", () => hostPlayQueueItem(q));
-      row.querySelector("[data-remove]").addEventListener("click", () =>
-        send("queue:remove", { sessionId, queueId: q.queueId })
-      );
+      row.querySelector("[data-play]").addEventListener("click", () => {
+        if (isHost) hostPlayQueueItem(q);
+        else requestQueuePlay(q.queueId);
+      });
+      row.querySelector("[data-remove]").addEventListener("click", () => {
+        if (isHost) send("queue:remove", { sessionId, queueId: q.queueId });
+        else requestQueueRemove(q.queueId);
+      });
     }
 
     if (canControl) {
@@ -1382,7 +1452,8 @@ function renderQueue() {
         const next = queue.slice();
         const [moved] = next.splice(fromIdx, 1);
         next.splice(toIdx, 0, moved);
-        applyAndSendQueueOrder(next);
+        if (isHost) applyAndSendQueueOrder(next);
+        else requestQueueReorder(next.map((item) => item.queueId));
       });
     }
 
@@ -1408,6 +1479,7 @@ async function hostPlayQueueItem(qItem, { isPlaying, preserveShuffleState = fals
   if (!preserveShuffleState) resetShuffleState();
 
   hostIntentIsPlaying = nextIsPlaying;
+  resetProviderPositionCaches();
 
   nowPlaying = {
     queueId: qItem.queueId,
@@ -1544,6 +1616,7 @@ async function playPrevInSharedQueue() {
 async function playTrackOnMySource(track) {
   if (!track) return;
 
+  resetProviderPositionCaches();
 
   if (playbackSource === "apple") {
     await applePlayTrack(track);
@@ -1611,7 +1684,7 @@ async function syncClientToNowPlaying() {
         await applePlay();
         startAppleStateSync();
       } else if (playbackSource === "spotify") {
-        //await playerPlay();
+        await playerPlay();
         startSpotifyStateSync();
       }
     } catch {}
@@ -1687,8 +1760,11 @@ async function startSpotifyStateSync() {
 
       const dur = Number(s.duration || 0);
       const pos = Math.max(0, Math.min(Number(s.position || 0), dur || Infinity));
-      lastSpotifyPosMs = pos;
       const paused = !!s.paused;
+      const currentPlayheadMs = Number(nowPlaying?.playheadMs || 0);
+      if (!paused && pos + 900 < currentPlayheadMs) return;
+
+      lastSpotifyPosMs = pos;
 
       nowPlaying = {
         ...nowPlaying,
@@ -1733,13 +1809,17 @@ async function startAppleStateSync() {
 
       if (!a) return;
 
-      lastApplePosMs = Number(a.positionMs) || 0;
+      const providerPosMs = Number(a.positionMs) || 0;
+      const currentPlayheadMs = Number(nowPlaying?.playheadMs || 0);
+      if (a.isPlaying && providerPosMs + 900 < currentPlayheadMs) return;
+
+      lastApplePosMs = providerPosMs;
 
       // Keep UI driven by the *real* player clock
       nowPlaying = {
         ...nowPlaying,
         isPlaying: !!a.isPlaying,
-        playheadMs: Number(a.positionMs),
+        playheadMs: providerPosMs,
         // NOTE: no startedAt updates here (you wanted to remove manual timestamping)
       };
 

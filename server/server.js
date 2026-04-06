@@ -67,6 +67,17 @@ const COLORS = [
 
 const feedback = []; // { message, at }
 const FEEDBACK_LIMIT = 500;
+const ipRateLimits = new Map(); // key -> { count, resetAt }
+const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
+
+const TRUSTED_FEEDBACK_HOSTS = [
+  "chathaaa.github.io",
+  "localhost",
+  "127.0.0.1",
+];
+
+const CHAT_RATE_WINDOW_MS = 10 * 1000;
+const CHAT_RATE_LIMIT = 8;
 
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
@@ -78,6 +89,12 @@ function getRoom(roomId) {
     });
   }
   return rooms.get(roomId);
+}
+
+function pruneEmptyRooms(now = Date.now()) {
+  for (const [rid, r] of rooms.entries()) {
+    if (r.clients.size === 0 && now - r.lastActive > ROOM_TTL_MS) rooms.delete(rid);
+  }
 }
 
 function colorFor(room, username) {
@@ -119,6 +136,48 @@ function sendFeedbackToDiscord(message) {
   } catch (err) {
     console.error("[DISCORD] invalid webhook URL:", err);
   }
+}
+
+function getClientIp(req) {
+  const forwarded = req.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) {
+    return forwarded.split(",")[0].trim();
+  }
+  return req.socket?.remoteAddress || "unknown";
+}
+
+function getOriginHostname(origin) {
+  if (!origin || origin === "null") return null;
+  try {
+    return new URL(origin).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isChromeExtensionOrigin(origin) {
+  return typeof origin === "string" && origin.startsWith("chrome-extension://");
+}
+
+function isTrustedFeedbackOrigin(origin) {
+  if (!origin || origin === "null") return true;
+  if (isChromeExtensionOrigin(origin)) return true;
+
+  const hostname = getOriginHostname(origin);
+  return !!hostname && TRUSTED_FEEDBACK_HOSTS.includes(hostname);
+}
+
+function isRateLimited(key, limit, windowMs, now = Date.now()) {
+  const entry = ipRateLimits.get(key);
+  if (!entry || now >= entry.resetAt) {
+    ipRateLimits.set(key, { count: 1, resetAt: now + windowMs });
+    return false;
+  }
+
+  if (entry.count >= limit) return true;
+
+  entry.count += 1;
+  return false;
 }
 
 /* =========================================================
@@ -241,11 +300,7 @@ const server = http.createServer(async (req, res) => {
   // WatchParty: list active rooms
   if (req.method === "GET" && req.url.startsWith("/games")) {
     const now = Date.now();
-
-    const DAY_MS = 24 * 60 * 60 * 1000;
-    for (const [rid, r] of rooms.entries()) {
-      if (r.clients.size === 0 && now - r.lastActive > DAY_MS) rooms.delete(rid);
-    }
+    pruneEmptyRooms(now);
 
     const games = [];
     for (const [rid, r] of rooms.entries()) {
@@ -261,6 +316,17 @@ const server = http.createServer(async (req, res) => {
 
   // WatchParty: feedback endpoint
   if (req.method === "POST" && req.url.startsWith("/feedback")) {
+    if (!isTrustedFeedbackOrigin(req.headers.origin)) {
+      json(req, res, 403, { ok: false, error: "forbidden_origin" });
+      return;
+    }
+
+    const ip = getClientIp(req);
+    if (isRateLimited(`feedback:${ip}`, 5, 5 * 60 * 1000)) {
+      json(req, res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+
     let body = "";
 
     req.on("data", (chunk) => {
@@ -360,7 +426,9 @@ const server = http.createServer(async (req, res) => {
           const tr = document.createElement("tr");
 
           const tdRoom = document.createElement("td");
-          tdRoom.innerHTML = "<code>" + g.roomId + "</code>";
+          const code = document.createElement("code");
+          code.textContent = g.roomId;
+          tdRoom.appendChild(code);
 
           const tdClients = document.createElement("td");
           tdClients.textContent = g.clients;
@@ -464,12 +532,28 @@ wssWatchParty.on("connection", (ws, req) => {
   room.clients.add(ws);
   room.lastActive = Date.now();
   ws._roomId = roomId;
+  ws._chatRate = { count: 0, resetAt: Date.now() + CHAT_RATE_WINDOW_MS };
 
   console.log(`[WP CONNECT] room="${roomId}" clients=${room.clients.size}`);
 
   ws.send(JSON.stringify({ type: "history", messages: room.messages }));
 
   ws.on("message", (data) => {
+    const now = Date.now();
+    if (!ws._chatRate || now >= ws._chatRate.resetAt) {
+      ws._chatRate = { count: 0, resetAt: now + CHAT_RATE_WINDOW_MS };
+    }
+    ws._chatRate.count += 1;
+    if (ws._chatRate.count > CHAT_RATE_LIMIT) {
+      if (ws.readyState === 1) {
+        ws.send(JSON.stringify({
+          type: "error",
+          message: "You are sending messages too quickly.",
+        }));
+      }
+      return;
+    }
+
     let incoming;
     try { incoming = JSON.parse(data); }
     catch {
@@ -510,6 +594,10 @@ wssWatchParty.on("connection", (ws, req) => {
     }
   });
 });
+
+setInterval(() => {
+  pruneEmptyRooms();
+}, 60 * 60 * 1000);
 
 /* =========================================================
    SyncSong WS behavior (default route)
@@ -614,12 +702,16 @@ wssSyncSong.on("connection", (ws) => {
     }
 
     const canControl = (userId === session.hostUserId) || !!session.allowGuestControl;
+    const isHost = userId === session.hostUserId;
 
     if (
       type === "control:next" ||
       type === "control:prev" ||
       type === "control:toggle" ||
-      type === "control:seek"
+      type === "control:seek" ||
+      type === "control:queue-play" ||
+      type === "control:queue-remove" ||
+      type === "control:queue-reorder"
     ) {
       if (!canControl) {
         safeSend(ws, { type: "error", message: "Host has not enabled guest controls" });
@@ -694,8 +786,8 @@ wssSyncSong.on("connection", (ws) => {
     }
 
     if (type === "queue:remove") {
-      if (!canControl) {
-        safeSend(ws, { type: "error", message: "Only host can remove (or host must enable guest controls)" });
+      if (!isHost) {
+        safeSend(ws, { type: "error", message: "Only host can remove directly" });
         return;
       }
       const queueId = payload?.queueId;
@@ -708,8 +800,8 @@ wssSyncSong.on("connection", (ws) => {
     }
 
     if (type === "queue:reorder") {
-      if (!canControl) {
-        safeSend(ws, { type: "error", message: "Only host can reorder (or host must enable guest controls)" });
+      if (!isHost) {
+        safeSend(ws, { type: "error", message: "Only host can reorder directly" });
         return;
       }
 
@@ -738,15 +830,18 @@ wssSyncSong.on("connection", (ws) => {
     }
 
     if (type === "host:state") {
-      if (!canControl) return;
+      if (!isHost) {
+        safeSend(ws, { type: "error", message: "Only host can publish playback state" });
+        return;
+      }
       session.nowPlaying = payload?.nowPlaying || null;
       broadcast(session, { type: "nowPlaying:updated", nowPlaying: session.nowPlaying });
       return;
     }
 
     if (type === "host:play" || type === "host:pause" || type === "host:resume" || type === "host:next") {
-      if (!canControl) {
-        safeSend(ws, { type: "error", message: "Only host can control playback (or host must enable guest controls)" });
+      if (!isHost) {
+        safeSend(ws, { type: "error", message: "Only host can broadcast playback commands" });
         return;
       }
       broadcast(session, { type, payload });
