@@ -67,6 +67,8 @@ const COLORS = [
 
 const feedback = []; // { message, at }
 const FEEDBACK_LIMIT = 500;
+const usageEvents = []; // lightweight extension telemetry, kept in-memory only
+const USAGE_LIMIT = 1000;
 const ipRateLimits = new Map(); // key -> { count, resetAt }
 const ROOM_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -311,6 +313,48 @@ const server = http.createServer(async (req, res) => {
     games.sort((a, b) => (b.clients - a.clients) || (b.lastActive - a.lastActive));
 
     json(req, res, 200, { ok: true, games });
+    return;
+  }
+
+  // SyncSong extension: usage pings. Keep this route intentionally permissive
+  // and lightweight so older extension builds do not spam 404s in the console.
+  if (req.method === "POST" && req.url.startsWith("/usage")) {
+    const ip = getClientIp(req);
+    if (isRateLimited(`usage:${ip}`, 120, 60 * 1000)) {
+      json(req, res, 429, { ok: false, error: "rate_limited" });
+      return;
+    }
+
+    let body = "";
+
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 100_000) {
+        body = "";
+        json(req, res, 413, { ok: false, error: "payload_too_large" });
+        req.socket.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      let payload = {};
+      try {
+        payload = body ? JSON.parse(body) : {};
+      } catch {
+        payload = {};
+      }
+
+      usageEvents.push({
+        at: Date.now(),
+        ip,
+        origin: String(req.headers.origin || "").slice(0, 200),
+        event: String(payload?.event || payload?.type || "usage").slice(0, 80),
+      });
+      if (usageEvents.length > USAGE_LIMIT) usageEvents.shift();
+
+      json(req, res, 200, { ok: true });
+    });
+
     return;
   }
 
