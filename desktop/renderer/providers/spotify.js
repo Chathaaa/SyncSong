@@ -151,6 +151,37 @@ export async function spotifyApi(path, opts = {}) {
 let spotifyPlayer = null;
 let spotifyDeviceId = null;
 let deviceReadyPromise = null;
+let resolveDeviceReady = null;
+
+function resetDeviceReadyPromise() {
+  deviceReadyPromise = new Promise((resolve) => {
+    resolveDeviceReady = resolve;
+  });
+}
+
+function markDeviceReady(deviceId) {
+  spotifyDeviceId = deviceId;
+  spotifyPlaybackPrepared = false;
+  spotifyPreparedDeviceId = "";
+
+  if (resolveDeviceReady) {
+    resolveDeviceReady(deviceId);
+    resolveDeviceReady = null;
+  }
+}
+
+async function waitForReadyDevice({ timeoutMs = 15000 } = {}) {
+  await ensureSpotifyWebPlayer();
+  if (spotifyDeviceId) return spotifyDeviceId;
+
+  if (!deviceReadyPromise) resetDeviceReadyPromise();
+
+  const timeout = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error("Spotify device_id not ready yet.")), timeoutMs);
+  });
+
+  return Promise.race([deviceReadyPromise, timeout]);
+}
 
 export async function spotifyTransferToThisAppDevice() {
   if (!spotifyDeviceId) return;
@@ -168,25 +199,16 @@ window.onSpotifyWebPlaybackSDKReady = () => {
   // console.log("[spotify] Web Playback SDK ready");
 };
 
-function waitForDeviceId({ timeoutMs = 15000 } = {}) {
-  return new Promise((resolve, reject) => {
-    const t0 = Date.now();
-    const timer = setInterval(() => {
-      if (spotifyDeviceId) {
-        clearInterval(timer);
-        resolve(spotifyDeviceId);
-      } else if (Date.now() - t0 > timeoutMs) {
-        clearInterval(timer);
-        reject(new Error("Spotify device_id not ready yet."));
-      }
-    }, 100);
-  });
-}
-
 export async function ensureSpotifyWebPlayer() {
-  if (spotifyPlayer) return spotifyPlayer;
+  if (spotifyPlayer) {
+    if (!spotifyDeviceId) {
+      if (!deviceReadyPromise) resetDeviceReadyPromise();
+      try { await spotifyPlayer.connect(); } catch {}
+    }
+    return spotifyPlayer;
+  }
 
-  const token = getSpotifyAccessToken();
+  const token = await spotifyEnsureAccessToken();
   if (!token) throw new Error("Spotify not connected (token missing/expired).");
 
   if (!window.Spotify || !window.Spotify.Player) {
@@ -206,18 +228,25 @@ export async function ensureSpotifyWebPlayer() {
     volume: Number(localStorage.getItem("syncsong:playerVolume01") ?? 1),
   });
 
-  deviceReadyPromise = deviceReadyPromise || new Promise((resolve) => {
-    spotifyPlayer.addListener("ready", async ({ device_id }) => {
-      spotifyDeviceId = device_id;
-      //console.log("[spotify] ready device_id=", device_id);
-      try { await spotifyTransferToThisAppDevice(); } catch (e) { console.warn("[spotify] transfer failed:", e); }
-      resolve(device_id);
-    });
+  if (!deviceReadyPromise) resetDeviceReadyPromise();
+
+  spotifyPlayer.addListener("ready", async ({ device_id }) => {
+    markDeviceReady(device_id);
+    //console.log("[spotify] ready device_id=", device_id);
+    try { await spotifyTransferToThisAppDevice(); } catch (e) { console.warn("[spotify] transfer failed:", e); }
   });
 
   spotifyPlayer.addListener("not_ready", ({ device_id }) => {
     //console.log("[spotify] device offline", device_id);
-    if (spotifyDeviceId === device_id) spotifyDeviceId = null;
+    if (spotifyDeviceId === device_id) {
+      spotifyDeviceId = null;
+      spotifyPlaybackPrepared = false;
+      spotifyPreparedDeviceId = "";
+      resetDeviceReadyPromise();
+      setTimeout(() => {
+        try { spotifyPlayer?.connect?.(); } catch {}
+      }, 1000);
+    }
   });
 
   spotifyPlayer.addListener("authentication_error", ({ message }) =>
@@ -232,7 +261,7 @@ export async function ensureSpotifyWebPlayer() {
 
 export async function spotifyPreparePlaybackDevice() {
   await ensureSpotifyWebPlayer();
-  await (deviceReadyPromise || waitForDeviceId());
+  await waitForReadyDevice();
   if (!spotifyDeviceId) return;
 
   // Only do this once per device_id
@@ -310,8 +339,8 @@ function waitForSpotifyTrackChange(targetUri, { timeoutMs = 1200 } = {}) {
 export async function spotifyPlayUriInApp(spotifyUri) {
   if (!spotifyUri) throw new Error("Missing spotifyUri on track.");
 
-  const p = await ensureSpotifyWebPlayer();
-  await (deviceReadyPromise || waitForDeviceId()); // <- wait for ready
+  await ensureSpotifyWebPlayer();
+  await waitForReadyDevice(); // <- wait for ready, including after not_ready recovery
 
   if (!spotifyDeviceId) throw new Error("Spotify device_id not ready yet.");
 

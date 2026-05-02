@@ -58,6 +58,7 @@ let spotifyPollIgnoreUntil = 0;
 // --- Sync/race guards ---
 let transitionIgnoreUntil = 0;   // prevent pollers from mutating nowPlaying during track switches
 let remoteSeekIgnoreUntil = 0;   // prevent pollers from snapping UI back immediately after we apply a remote seek
+let localPlaybackLoadKey = "";   // prevent duplicate play/load commands while a track transition is in flight
 
 const inTransition = () => Date.now() < transitionIgnoreUntil;
 const ignoreForMs = (ms) => { transitionIgnoreUntil = Math.max(transitionIgnoreUntil, Date.now() + ms); };
@@ -1650,10 +1651,9 @@ async function syncClientToNowPlaying() {
     return;
   }
 
-  const targetMs = Number(nowPlaying.playheadMs || 0);
-
-  // helper: only seek when it’s meaningful, and don’t fight the user while scrubbing
+  // helper: only seek when it is meaningful, and do not fight the user while scrubbing
   const maybeSeekToTarget = async () => {
+    const targetMs = Number(nowPlaying?.playheadMs || 0);
     if (!targetMs || isScrubbing) return;
 
     const localMs =
@@ -1663,11 +1663,11 @@ async function syncClientToNowPlaying() {
 
     const drift = Math.abs(localMs - targetMs);
 
-    // Only correct meaningful drift so we don't constantly micro-adjust
+    // Only correct meaningful drift so we do not constantly micro-adjust
     if (drift <= 1200) return;
 
     try {
-      // ✅ give the seek a moment to apply before pollers snap UI back
+      // Give the seek a moment to apply before pollers snap UI back
       remoteSeekIgnoreUntil = Date.now() + 900;
       if (playbackSource === "apple") {
         const { appleSeek } = await import("./providers/apple.js");
@@ -1678,22 +1678,27 @@ async function syncClientToNowPlaying() {
     } catch {}
   };
 
-  if (loadKey === lastLoadedQueueKey) {
-    try {
-      if (playbackSource === "apple") {
-        await applePlay();
-        startAppleStateSync();
-      } else if (playbackSource === "spotify") {
-        await playerPlay();
-        startSpotifyStateSync();
-      }
-    } catch {}
-    await maybeSeekToTarget();          // ✅ apply seek on guests too
+  if (localPlaybackLoadKey === loadKey) {
     return;
   }
 
+  if (loadKey === lastLoadedQueueKey) {
+    try {
+      if (playbackSource === "apple") {
+        startAppleStateSync();
+        await maybeSeekToTarget();
+        await applePlay();
+      } else if (playbackSource === "spotify") {
+        await playerPlay();
+        startSpotifyStateSync();
+        await maybeSeekToTarget();
+      }
+    } catch {}
+    return;
+  }
 
   lastLoadedQueueKey = loadKey;
+  localPlaybackLoadKey = loadKey;
   localActiveQueueId = nowPlaying.queueId;
 
   try {
@@ -1702,9 +1707,11 @@ async function syncClientToNowPlaying() {
   } catch (e) {
     el("sessionMeta").textContent =
       `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
+  } finally {
+    if (localPlaybackLoadKey === loadKey) localPlaybackLoadKey = "";
   }
 
-  await maybeSeekToTarget();            // ✅ apply seek after load
+  await maybeSeekToTarget();            // apply seek after load
 }
 
 
@@ -2027,8 +2034,9 @@ function startHostAutoAdvance() {
         if (posMs > lastAppleMaxPosMs) lastAppleMaxPosMs = posMs;
 
         const jumpedToStart = (posMs < 1000) && (prevMaxPos > 5000);
+        const positionAtEnd = durMs > 10_000 && posMs >= durMs - END_BUFFER_MS;
         const wasNearEnd = (durMs > 10_000) && (prevMaxPos >= durMs - END_BUFFER_MS);
-        if (wasNearEnd && jumpedToStart && !providerIsPlaying) ended = true;
+        if (hostIntentIsPlaying && wasNearEnd && !providerIsPlaying && (jumpedToStart || positionAtEnd)) ended = true;
       }
 
 

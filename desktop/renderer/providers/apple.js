@@ -243,10 +243,17 @@ export async function applePlayTrack(track) {
 
   // Immediately sample player values once (helps even if events are flaky)
   try {
-    appleState.isPlaying =
-      mk.player?.playbackState === window.MusicKit?.PlaybackStates?.playing;
-    appleState.positionMs = Math.floor((mk.player?.currentPlaybackTime || 0) * 1000);
-    const d = Math.floor((mk.player?.currentPlaybackDuration || 0) * 1000);
+    const PLAYING = window.MusicKit?.PlaybackStates?.playing ?? 2;
+    const state = mk?.playbackState ?? mk.player?.playbackState;
+    appleState.isPlaying = state === PLAYING;
+
+    const t = mk?.playbackTime ?? mk?.currentPlaybackTime ?? mk.player?.currentPlaybackTime;
+    if (typeof t === "number" && Number.isFinite(t)) {
+      appleState.positionMs = Math.floor(t * 1000);
+    }
+
+    const dSeconds = mk?.playbackDuration ?? mk?.currentPlaybackDuration ?? mk.player?.currentPlaybackDuration;
+    const d = Math.floor((dSeconds || 0) * 1000);
     if (d > 0) appleState.durationMs = d;
   } catch {}
 }
@@ -439,17 +446,17 @@ export async function appleGetPlaybackState() {
   wireAppleEvents(mk);
 
   // Try to refresh from instance fields (v3) if they exist
-  const t = mk?.playbackTime ?? mk?.currentPlaybackTime;
+  const t = mk?.playbackTime ?? mk?.currentPlaybackTime ?? mk?.player?.currentPlaybackTime;
   if (typeof t === "number" && Number.isFinite(t)) {
     appleState.positionMs = Math.floor(t * 1000);
   }
 
-  const d = mk?.playbackDuration ?? mk?.currentPlaybackDuration;
+  const d = mk?.playbackDuration ?? mk?.currentPlaybackDuration ?? mk?.player?.currentPlaybackDuration;
   if (typeof d === "number" && Number.isFinite(d) && d > 0) {
     appleState.durationMs = Math.floor(d * 1000);
   }
 
-  const state = mk?.playbackState;
+  const state = mk?.playbackState ?? mk?.player?.playbackState;
   const PLAYING = window.MusicKit?.PlaybackStates?.playing ?? 2;
   if (typeof state !== "undefined") {
     appleState.isPlaying = state === PLAYING;
@@ -476,7 +483,8 @@ function wireAppleEvents(mk) {
       e?.playbackTime ??
       e?.currentPlaybackTime ??
       mk?.playbackTime ??
-      mk?.currentPlaybackTime;
+      mk?.currentPlaybackTime ??
+      mk?.player?.currentPlaybackTime;
 
     if (typeof t === "number" && Number.isFinite(t)) {
       appleState.positionMs = Math.floor(t * 1000);
@@ -486,7 +494,8 @@ function wireAppleEvents(mk) {
       e?.playbackDuration ??
       e?.currentPlaybackDuration ??
       mk?.playbackDuration ??
-      mk?.currentPlaybackDuration;
+      mk?.currentPlaybackDuration ??
+      mk?.player?.currentPlaybackDuration;
 
     if (typeof d === "number" && Number.isFinite(d) && d > 0) {
       appleState.durationMs = Math.floor(d * 1000);
@@ -500,7 +509,8 @@ function wireAppleEvents(mk) {
       e?.playbackDuration ??
       e?.currentPlaybackDuration ??
       mk?.playbackDuration ??
-      mk?.currentPlaybackDuration;
+      mk?.currentPlaybackDuration ??
+      mk?.player?.currentPlaybackDuration;
 
     if (typeof d === "number" && Number.isFinite(d) && d > 0) {
       appleState.durationMs = Math.floor(d * 1000);
