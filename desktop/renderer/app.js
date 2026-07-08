@@ -55,6 +55,8 @@ let isScrubbing = false;
 let scrubWasPlaying = false;
 
 let spotifyPollIgnoreUntil = 0;
+let localPausedAt = 0;
+const PROVIDER_IDLE_RELOAD_MS = 5 * 60 * 1000;
 // --- Sync/race guards ---
 let transitionIgnoreUntil = 0;   // prevent pollers from mutating nowPlaying during track switches
 let remoteSeekIgnoreUntil = 0;   // prevent pollers from snapping UI back immediately after we apply a remote seek
@@ -565,15 +567,17 @@ function connectWS() {
       const willPlay = !nowPlaying.isPlaying;
       hostIntentIsPlaying = willPlay;
 
-      try {
-        if (playbackSource === "apple") {
-          if (willPlay) await applePlay();
-          else await applePause();
-        } else if (playbackSource === "spotify") {
-          if (willPlay) await playerPlay();
+      let providerOk = true;
+      if (willPlay) {
+        providerOk = await resumeCurrentNowPlaying();
+      } else {
+        localPausedAt = Date.now();
+        try {
+          if (playbackSource === "apple") await applePause();
           else await playerPause();
-        }
-      } catch {}
+        } catch {}
+      }
+      if (!providerOk) return;
 
       nowPlaying = { ...nowPlaying, isPlaying: willPlay, updatedAt: Date.now() };
       send("host:state", { sessionId, nowPlaying });
@@ -1637,64 +1641,72 @@ async function playTrackOnMySource(track) {
   }
 }
 
-async function syncClientToNowPlaying() {
-  if (isSilentGuest()) return
-  if (!nowPlaying?.track) return;
+async function maybeSeekToNowPlayingTarget() {
+  const targetMs = Number(nowPlaying?.playheadMs || 0);
+  if (!targetMs || isScrubbing) return;
+
+  const localMs =
+    playbackSource === "spotify" ? Number(lastSpotifyPosMs || 0)
+    : playbackSource === "apple" ? Number(lastApplePosMs || 0)
+    : 0;
+
+  const drift = Math.abs(localMs - targetMs);
+  if (drift <= 1200) return;
+
+  try {
+    remoteSeekIgnoreUntil = Date.now() + 900;
+    if (playbackSource === "apple") {
+      const { appleSeek } = await import("./providers/apple.js");
+      await appleSeek(targetMs / 1000);
+    } else {
+      await playerSeek(targetMs / 1000);
+    }
+  } catch {}
+}
+
+async function shouldReloadCurrentProvider(loadKey) {
+  if (loadKey !== lastLoadedQueueKey) return true;
+
+  const wasIdleLongEnough = localPausedAt && Date.now() - localPausedAt > PROVIDER_IDLE_RELOAD_MS;
+
+  if (playbackSource === "spotify") {
+    try {
+      const { spotifyGetPlaybackState } = await import("./providers/spotify.js");
+      const state = await spotifyGetPlaybackState();
+      const currentUri = state?.track_window?.current_track?.uri || "";
+      if (!state || !currentUri) return true;
+      if (lastSpotifyUriLoaded && currentUri !== lastSpotifyUriLoaded) return true;
+    } catch {
+      return true;
+    }
+  }
+
+  return !!wasIdleLongEnough;
+}
+
+async function resumeCurrentNowPlaying() {
+  if (isSilentGuest()) return false;
+  if (!nowPlaying?.track) return false;
 
   const loadKey = `${nowPlaying.queueId}:${playbackSource}`;
+  if (localPlaybackLoadKey === loadKey) return true;
 
-  if (!nowPlaying.isPlaying) {
-    try {
-      if (playbackSource === "apple") await applePause();
-      else await playerPause();
-    } catch {}
-    return;
-  }
+  const shouldReload = await shouldReloadCurrentProvider(loadKey);
 
-  // helper: only seek when it is meaningful, and do not fight the user while scrubbing
-  const maybeSeekToTarget = async () => {
-    const targetMs = Number(nowPlaying?.playheadMs || 0);
-    if (!targetMs || isScrubbing) return;
-
-    const localMs =
-      playbackSource === "spotify" ? Number(lastSpotifyPosMs || 0)
-      : playbackSource === "apple" ? Number(lastApplePosMs || 0)
-      : 0;
-
-    const drift = Math.abs(localMs - targetMs);
-
-    // Only correct meaningful drift so we do not constantly micro-adjust
-    if (drift <= 1200) return;
-
-    try {
-      // Give the seek a moment to apply before pollers snap UI back
-      remoteSeekIgnoreUntil = Date.now() + 900;
-      if (playbackSource === "apple") {
-        const { appleSeek } = await import("./providers/apple.js");
-        await appleSeek(targetMs / 1000);
-      } else {
-        await playerSeek(targetMs / 1000);
-      }
-    } catch {}
-  };
-
-  if (localPlaybackLoadKey === loadKey) {
-    return;
-  }
-
-  if (loadKey === lastLoadedQueueKey) {
+  if (!shouldReload) {
     try {
       if (playbackSource === "apple") {
         startAppleStateSync();
-        await maybeSeekToTarget();
+        await maybeSeekToNowPlayingTarget();
         await applePlay();
       } else if (playbackSource === "spotify") {
         await playerPlay();
         startSpotifyStateSync();
-        await maybeSeekToTarget();
+        await maybeSeekToNowPlayingTarget();
       }
+      localPausedAt = 0;
+      return true;
     } catch {}
-    return;
   }
 
   lastLoadedQueueKey = loadKey;
@@ -1704,17 +1716,33 @@ async function syncClientToNowPlaying() {
   try {
     await stopAllLocalPlayback();
     await playTrackOnMySource(nowPlaying.track);
+    localPausedAt = 0;
+    await maybeSeekToNowPlayingTarget();
+    return true;
   } catch (e) {
     el("sessionMeta").textContent =
       `Playback sync failed (${playbackSource}): ${e?.message || String(e)}`;
+    lastLoadedQueueKey = "";
+    return false;
   } finally {
     if (localPlaybackLoadKey === loadKey) localPlaybackLoadKey = "";
   }
-
-  await maybeSeekToTarget();            // apply seek after load
 }
+async function syncClientToNowPlaying() {
+  if (isSilentGuest()) return;
+  if (!nowPlaying?.track) return;
 
+  if (!nowPlaying.isPlaying) {
+    localPausedAt ||= Date.now();
+    try {
+      if (playbackSource === "apple") await applePause();
+      else await playerPause();
+    } catch {}
+    return;
+  }
 
+  await resumeCurrentNowPlaying();
+}
 async function stopAllLocalPlayback() {
   // stop Spotify polling if we leave spotify
   stopSpotifyStateSync?.();
@@ -1768,6 +1796,8 @@ async function startSpotifyStateSync() {
       const dur = Number(s.duration || 0);
       const pos = Math.max(0, Math.min(Number(s.position || 0), dur || Infinity));
       const paused = !!s.paused;
+      if (paused) localPausedAt ||= Date.now();
+      else localPausedAt = 0;
       const currentPlayheadMs = Number(nowPlaying?.playheadMs || 0);
       if (!paused && pos + 900 < currentPlayheadMs) return;
 
@@ -1821,6 +1851,8 @@ async function startAppleStateSync() {
       if (a.isPlaying && providerPosMs + 900 < currentPlayheadMs) return;
 
       lastApplePosMs = providerPosMs;
+      if (a.isPlaying) localPausedAt = 0;
+      else localPausedAt ||= Date.now();
 
       // Keep UI driven by the *real* player clock
       nowPlaying = {
@@ -2239,18 +2271,19 @@ function wireUi() {
 
     hostIntentIsPlaying = willPlay;
 
-    // ✅ Tell the local provider first (host is the source of truth for play/pause)
-    try {
-      if (playbackSource === "apple") {
-        if (willPlay) await applePlay();
-        else await applePause();
-      } else if (playbackSource === "spotify") {
-        if (willPlay) await playerPlay();
+    let providerOk = true;
+    if (willPlay) {
+      providerOk = await resumeCurrentNowPlaying();
+    } else {
+      localPausedAt = Date.now();
+      try {
+        if (playbackSource === "apple") await applePause();
         else await playerPause();
+      } catch (e) {
+        console.warn("[play/pause] provider command failed", e);
       }
-    } catch (e) {
-      console.warn("[play/pause] provider command failed", e);
     }
+    if (!providerOk) return;
 
     // ✅ Broadcast shared state (no manual timestamps)
     nowPlaying = {
