@@ -27,7 +27,7 @@
     ">
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>SyncSong</title>
-  <script type="module" crossorigin src="/assets/main-EVobdVEx.js"></script>
+  <script type="module" crossorigin src="/assets/main-Dl3KrzeP.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/modulepreload-polyfill-B5Qt9EMX.js">
   <link rel="stylesheet" crossorigin href="/assets/main-6wbQD_PO.css">
 </head>
@@ -63,14 +63,14 @@
           <div class="calloutBody">
             SyncSong lets you build a shared queue from everyone's playlists and play it back on your preferred platform.
             <br />
-            Sign in to Spotify or Apple Music to browse your library and add songs.
+            Use Apple Music to browse your library and add songs. Spotify is not supported right now because this build depends on a developer account that is no longer active.
           </div>
           <div class="calloutActions">
-            <button id="connectPromptSpotify" type="button">Sign in with Spotify</button>
+            <button id="connectPromptSpotify" type="button" disabled title="Spotify is not supported right now">Spotify unavailable</button>
             <button id="connectPromptApple" type="button">Sign in with Apple Music</button>
           </div>
           <div class="calloutFineprint">
-            You can connect both - playback uses your selected player.
+            Spotify support is currently unavailable. Apple Music is the supported sign-in option for now.
           </div>
         </div>
           <div class="panelHeader">
@@ -78,7 +78,7 @@
               <button id="sourceSpotify" class="tab">Spotify</button>
               <button id="sourceApple" class="tab">Apple Music</button>
 
-              <button class="btnPrimary" id="connectSpotify" style="display:none;">Connect Spotify</button>
+              <button class="btnPrimary" id="connectSpotify" style="display:none;" disabled title="Spotify is not supported right now">Spotify unavailable</button>
               <button id="signOutSpotify" style="display:none;">Sign Out Spotify</button>
               <button class="btnPrimary" id="connectApple" style="display:none;">Connect Apple</button>
               <button id="signOutApple" style="display:none;">Sign Out Apple</button>

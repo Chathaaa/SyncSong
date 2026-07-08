@@ -48,13 +48,20 @@
         localStorage.setItem("spotify:access_token", tok.access_token || "");
         localStorage.setItem("spotify:refresh_token", tok.refresh_token || "");
         localStorage.setItem("spotify:expires_at", String(Date.now() + (tok.expires_in || 0) * 1000));
+        localStorage.removeItem("spotify:last_auth_error");
 
         const openerOrigin = window.location.origin;
         window.opener?.postMessage({ type: "spotify:token", token: tok }, openerOrigin);
 
         message.textContent = "Spotify connected. You can close this window.";
       } catch (e) {
-        message.textContent = `Spotify auth failed: ${String(e?.message || e)}`;
+        const errorMessage = String(e?.message || e);
+        localStorage.setItem("spotify:last_auth_error", errorMessage);
+        window.opener?.postMessage(
+          { type: "spotify:error", message: errorMessage },
+          window.location.origin
+        );
+        message.textContent = `Spotify auth failed: ${errorMessage}`;
       }
     </script>
 

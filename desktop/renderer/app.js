@@ -91,6 +91,8 @@ const APPLE_DEV_TOKEN_KEY = "syncsong:appleDevToken";
 const APPLE_USER_TOKEN_KEY = "syncsong:appleUserToken";
 
 const PLAYBACK_SOURCE_KEY = "syncsong:playbackSource"; // "apple" | "spotify"
+const SPOTIFY_SUPPORTED = false;
+const SPOTIFY_UNSUPPORTED_MESSAGE = "Spotify is not supported right now because this build depends on a Spotify developer account that is no longer active. Please use Apple Music instead.";
 
 const DISPLAY_NAME_KEY = "syncsong:displayName";
 const SHUFFLE_QUEUE_KEY = "syncsong:shuffleQueue";
@@ -101,6 +103,7 @@ const ROOM_QUERY_PARAM = "room";
 const PREV_RESTART_THRESHOLD_MS = 3000;
 
 function hasSpotifyAuth() {
+  if (!SPOTIFY_SUPPORTED) return false;
   return !!(localStorage.getItem("spotify:refresh_token") || localStorage.getItem("spotify:access_token"));
 }
 function hasAppleAuth() {
@@ -115,7 +118,7 @@ function pickInitialPlaybackSource() {
   if (stored === "apple" && hasAppleAuth()) return "apple";
   if (hasSpotifyAuth()) return "spotify";
   if (hasAppleAuth()) return "apple";
-  return stored || "spotify";
+  return stored === "spotify" && !SPOTIFY_SUPPORTED ? "apple" : (stored || "apple");
 }
 
 let playbackSource = pickInitialPlaybackSource();
@@ -689,7 +692,7 @@ function renderConnectPrompt() {
   const box = el("connectPrompt");
   if (!box) return;
 
-  const needsConnect = !hasSpotifyAuth() && !hasAppleAuth();
+  const needsConnect = !hasAppleAuth();
   box.style.display = needsConnect ? "block" : "none";
 }
 
@@ -713,7 +716,12 @@ function renderConnectButtons() {
 
   // Only show the connect button for the CURRENT music tab
   if (musicSource === "spotify") {
-    if (sp) sp.style.display = hasSpotifyAuth() ? "none" : "inline-block";
+    if (sp) {
+      sp.style.display = "inline-block";
+      sp.disabled = !SPOTIFY_SUPPORTED;
+      sp.textContent = SPOTIFY_SUPPORTED ? "Connect Spotify" : "Spotify unavailable";
+      sp.title = SPOTIFY_SUPPORTED ? "" : SPOTIFY_UNSUPPORTED_MESSAGE;
+    }
     if (spOut) spOut.style.display = hasSpotifyAuth() ? "inline-block" : "none";
     if (ap) ap.style.display = "none";
     if (apOut) apOut.style.display = "none";
@@ -736,7 +744,12 @@ function renderConnectButtons() {
 }
 
 function renderMusicTabs() {
-  el("sourceSpotify")?.classList.toggle("active", musicSource === "spotify");
+  const spotifyTab = el("sourceSpotify");
+  spotifyTab?.classList.toggle("active", musicSource === "spotify");
+  if (spotifyTab) {
+    spotifyTab.disabled = !SPOTIFY_SUPPORTED;
+    spotifyTab.title = SPOTIFY_SUPPORTED ? "" : SPOTIFY_UNSUPPORTED_MESSAGE;
+  }
   el("sourceApple")?.classList.toggle("active", musicSource === "apple");
 
   renderConnectPrompt();
@@ -1090,6 +1103,17 @@ async function ensureSpotifyLibraryReady() {
 
 // Spotify playlist/track helpers moved to providers/spotify.js
 async function loadSpotifyPlaylistsAndTracks() {
+  if (!SPOTIFY_SUPPORTED) {
+    playlists = [];
+    tracks = [];
+    renderMusicPlaylists();
+    applySearch();
+    el("sessionMeta").textContent = SPOTIFY_UNSUPPORTED_MESSAGE;
+    renderConnectPrompt();
+    renderConnectButtons();
+    return;
+  }
+
   const ok = await ensureSpotifyLibraryReady();
   if (!ok) {
     playlists = [];
@@ -1266,6 +1290,15 @@ async function reloadMusic() {
 }
 
 async function setSource(next) {
+  if (next === "spotify" && !SPOTIFY_SUPPORTED) {
+    musicSource = "apple";
+    localStorage.setItem(LAST_SOURCE_KEY, musicSource);
+    renderMusicTabs();
+    el("sessionMeta").textContent = SPOTIFY_UNSUPPORTED_MESSAGE;
+    await reloadMusic();
+    return;
+  }
+
   musicSource = next;
   localStorage.setItem(LAST_SOURCE_KEY, musicSource);
   renderMusicTabs();
@@ -2495,12 +2528,31 @@ function wireUi() {
 
   }
 
+  function spotifyConnectErrorMessage(error) {
+    const raw = String(error?.message || error || "Unknown Spotify error.");
+    if (/access_denied/i.test(raw)) return "Spotify sign-in was cancelled.";
+    if (/timed out waiting for spotify token/i.test(raw)) {
+      return "Spotify sign-in did not finish. Complete the Spotify popup, or use Apple Music if Spotify is unavailable.";
+    }
+    if (/premium/i.test(raw)) return raw;
+    if (/developer dashboard|approved spotify accounts/i.test(raw)) return raw;
+    return "Spotify connect failed: " + raw;
+  }
   window.addEventListener("message", (event) => {
     // Security: only accept messages from our own origin
     if (event.origin !== window.location.origin) return;
 
     const msg = event.data;
-    if (!msg || msg.type !== "spotify:token" || !msg.token) return;
+    if (!msg) return;
+
+    if (msg.type === "spotify:error") {
+      const errorMessage = String(msg.message || "Spotify authorization failed.");
+      localStorage.setItem("spotify:last_auth_error", errorMessage);
+      el("sessionMeta").textContent = spotifyConnectErrorMessage(errorMessage);
+      return;
+    }
+
+    if (msg.type !== "spotify:token" || !msg.token) return;
 
     const tok = msg.token;
 
@@ -2524,9 +2576,13 @@ function wireUi() {
 
       const timer = setInterval(() => {
         const tok = localStorage.getItem("spotify:access_token");
+        const authError = localStorage.getItem("spotify:last_auth_error");
         if (tok) {
           clearInterval(timer);
           resolve(tok);
+        } else if (authError) {
+          clearInterval(timer);
+          reject(new Error(authError));
         } else if (Date.now() - t0 > timeoutMs) {
           clearInterval(timer);
           reject(new Error("Timed out waiting for Spotify token."));
@@ -2567,7 +2623,13 @@ function wireUi() {
 
 
   el("connectSpotify")?.addEventListener("click", async () => {
+    if (!SPOTIFY_SUPPORTED) {
+      el("sessionMeta").textContent = SPOTIFY_UNSUPPORTED_MESSAGE;
+      return;
+    }
+
     try {
+      localStorage.removeItem("spotify:last_auth_error");
       // Web: if we already have a refresh token, refresh silently and skip popup.
       if (!window?.api?.spotifyConnect) {
         const { spotifyEnsureAccessToken } = await import("./providers/spotify.js");
@@ -2605,7 +2667,7 @@ function wireUi() {
 
     } catch (e) {
       console.error("[spotify] connect failed", e);
-      el("sessionMeta").textContent = "Spotify connect failed: " + (e?.message || String(e));
+      el("sessionMeta").textContent = spotifyConnectErrorMessage(e);
     }
   });
 
