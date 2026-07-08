@@ -25,6 +25,22 @@ export async function fetchAppleDeveloperToken() {
   return json.token;
 }
 
+function decodeJwtPayload(token) {
+  const encoded = String(token).split(".")[1] || "";
+  const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+  return JSON.parse(atob(base64));
+}
+
+function isAppleDeveloperTokenExpired(token, skewSeconds = 300) {
+  try {
+    const payload = decodeJwtPayload(token);
+    const exp = Number(payload?.exp || 0);
+    return !exp || Date.now() >= (exp - skewSeconds) * 1000;
+  } catch {
+    return true;
+  }
+}
+
 export async function ensureAppleConfigured() {
   const waitFor = async (fn, timeoutMs = 15000) => {
     const t0 = Date.now();
@@ -42,6 +58,10 @@ export async function ensureAppleConfigured() {
 
   // 2) Configure once (developer token)
   let devToken = localStorage.getItem("syncsong:appleDevToken");
+  if (devToken && isAppleDeveloperTokenExpired(devToken)) {
+    localStorage.removeItem("syncsong:appleDevToken");
+    devToken = null;
+  }
   if (!devToken) devToken = await fetchAppleDeveloperToken();
 
   if (!window.__appleConfiguredPromise) {
@@ -110,7 +130,7 @@ export const appleCatalogIdCache = new Map(); // key: sourceId -> catalogSongId
 export async function appleEnsureAuthorized() {
   await ensureAppleConfigured();
 
-  // âœ… Always grab the live instance (donâ€™t rely on a cached object)
+  // Always grab the live instance; do not rely on a cached object.
   const mk = window.MusicKit.getInstance();
 
   if (!getAppleUserToken()) {
@@ -118,7 +138,7 @@ export async function appleEnsureAuthorized() {
     localStorage.setItem("syncsong:appleUserToken", userToken);
   }
 
-  // âœ… Re-wire if instance changed
+  // Re-wire if instance changed.
   if (wiredForInstance !== mk) {
     wiredForInstance = mk;
     appleWired = false;       // allow wiring again

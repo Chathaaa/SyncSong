@@ -2523,7 +2523,8 @@ function wireUi() {
   });
 
   el("signOutApple")?.addEventListener("click", async () => {
-    localStorage.removeItem("syncsong:appleUserToken");
+    localStorage.removeItem(APPLE_USER_TOKEN_KEY);
+    localStorage.removeItem(APPLE_DEV_TOKEN_KEY);
     localStorage.removeItem("syncsong:lastApplePlaylistId");
     renderConnectPrompt();
     renderConnectButtons();
